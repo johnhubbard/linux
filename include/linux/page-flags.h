@@ -429,27 +429,33 @@ static __always_inline int __PageMovable(struct page *page)
  * page->dma_pinned_flags will NOT ever be set. Therefore, there is no need
  * for a page_mapping()-style accessor function for page->lru.
  */
-#define PAGE_DMA_PINNED		0x1
+#define PAGE_DMA_PINNED		0x2
 #define PAGE_DMA_PINNED_FLAGS	(PAGE_DMA_PINNED)
 
 static __always_inline int PageDmaPinnedFlags(struct page *page)
 {
-	return (page->dma_pinned_flags & PAGE_DMA_PINNED_FLAGS) != 0;
+	page = compound_head(page);
+	return (atomic_read(&page->dma_pinned_flags) & PAGE_DMA_PINNED_FLAGS) != 0;
 }
 
 static __always_inline int PageDmaPinned(struct page *page)
 {
-	return (page->dma_pinned_flags & PAGE_DMA_PINNED) != 0;
+	page = compound_head(page);
+	return (atomic_read(&page->dma_pinned_flags) & PAGE_DMA_PINNED) != 0;
 }
 
 static __always_inline void SetPageDmaPinned(struct page *page)
 {
-	page->dma_pinned_flags = PAGE_DMA_PINNED;
+	page = compound_head(page);
+	atomic_set(&page->dma_pinned_flags, PAGE_DMA_PINNED);
 }
 
 static __always_inline void ClearPageDmaPinned(struct page *page)
 {
-	VM_BUG_ON(!PageDmaPinnedFlags(page));
+	page = compound_head(page);
+	VM_BUG_ON_PAGE(!PageDmaPinnedFlags(page), page);
+	atomic_set(&page->dma_pinned_flags, 0);
+
 	INIT_LIST_HEAD(&page->lru);
 }
 

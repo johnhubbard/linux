@@ -824,6 +824,7 @@ void lru_add_page_tail(struct page *page, struct page *page_tail,
 	VM_BUG_ON_PAGE(!PageHead(page), page);
 	VM_BUG_ON_PAGE(PageCompound(page_tail), page);
 	VM_BUG_ON_PAGE(PageLRU(page_tail), page);
+	VM_BUG_ON_PAGE(PageDmaPinned(page_tail), page);
 	VM_BUG_ON(NR_CPUS != 1 &&
 		  !spin_is_locked(&lruvec_pgdat(lruvec)->lru_lock));
 
@@ -862,6 +863,12 @@ static void __pagevec_lru_add_fn(struct page *page, struct lruvec *lruvec,
 	int was_unevictable = TestClearPageUnevictable(page);
 
 	VM_BUG_ON_PAGE(PageLRU(page), page);
+
+	/* These kinds of pages expect to stay *off* of the LRU: */
+	if (PageDmaPinned(page)) {
+		WARN_ON_ONCE(PageDmaPinned(page));
+		return;
+	}
 
 	SetPageLRU(page);
 	/*
