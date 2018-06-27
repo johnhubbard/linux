@@ -88,6 +88,10 @@ struct page {
 				/* Used by get_user_pages*(). Protected by
 				 * the page lock.
 				 */
+				struct {
+					atomic_t PLACEHOLDER_dma_pinned_flags;
+					atomic_t dma_pinned_count;
+				};
 			};
 			/* See page-flags.h for PAGE_MAPPING_FLAGS */
 			struct address_space *mapping;
@@ -208,7 +212,7 @@ struct page {
 #endif
 	struct {
 		atomic_t dma_pinned_flags;
-		atomic_t dma_pinned_count;
+		//atomic_t dma_pinned_count;
 	};
 } _struct_page_alignment;
 
