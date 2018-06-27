@@ -895,6 +895,8 @@ static inline bool is_device_public_page(const struct page *page)
 }
 #endif /* CONFIG_DEV_PAGEMAP_OPS */
 
+void put_page_for_pinned_dma(struct page *page);
+
 static inline void get_page(struct page *page)
 {
 	page = compound_head(page);
@@ -909,6 +911,8 @@ static inline void get_page(struct page *page)
 static inline void put_page(struct page *page)
 {
 	page = compound_head(page);
+
+	put_page_for_pinned_dma(page);
 
 	/*
 	 * For devmap managed pages we need to catch refcount transition from
