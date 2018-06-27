@@ -40,8 +40,13 @@ static int pin_page_for_dma(struct page *page)
 	ret = isolate_lru_page(page);
 
 	if (ret == 0) {
+		/* Avoid problems later, when freeing the page: */
+		ClearPageActive(page);
+		ClearPageUnevictable(page);
+
 		/* counteract isolate_lru_page's effects: */
 		put_page(page);
+
 		atomic_set(&page->dma_pinned_count, 1);
 
 		/* Set this after initializing the count, above. That way,
@@ -49,7 +54,6 @@ static int pin_page_for_dma(struct page *page)
 		 * not use the count until it is initialized.
 		 */
 		SetPageDmaPinned(page);
-
 	}
 
 	return ret;
@@ -68,13 +72,8 @@ void put_page_for_pinned_dma(struct page *page)
 	 * require that...ummm...
 	 */
 	if (unlikely(PageDmaPinned(page))) {
-		if (atomic_dec_and_test(&page->dma_pinned_count)) {
-			/* Avoid problems later, when freeing the page: */
-			ClearPageActive(page);
-			ClearPageUnevictable(page);
-
+		if (atomic_dec_and_test(&page->dma_pinned_count))
 			ClearPageDmaPinned(page);
-		}
 	}
 }
 EXPORT_SYMBOL(put_page_for_pinned_dma);
