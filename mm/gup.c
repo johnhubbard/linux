@@ -24,8 +24,32 @@ static int pin_page_for_dma(struct page *page)
 {
 	int ret;
 
+	/* Huge pages cannot be split while the refcount is elevated, so
+	 * always refer to the head page.
+	 */
+
+	if (PageHuge(page)) {
+		WARN_RATELIMIT(PageHuge(page), "JH:A: trying to dma-pin a HugeTLB page");
+		return -ENOTSUPP;
+	}
+
+	/* THPs should be supported, but for debugging step 1, omit them: */
+	if (PageTransHuge(page)) {
+		WARN_RATELIMIT(PageTransHuge(page), "JH:A: trying to dma-pin a THP");
+		return -ENOTSUPP;
+	}
+
+	VM_BUG_ON_PAGE(PageHuge(page), page);
+	VM_BUG_ON_PAGE(PageTransHuge(page), page);
+	WARN_RATELIMIT(PageTail(page), "JH:A: trying to dma-pin a tail page");
+
+	VM_BUG_ON_PAGE(compound_head(page) != page, page);
+	page = compound_head(page);
+
 	if (PageDmaPinned(page)) {
 		/* Page was not on an LRU list, because it was DMA-pinned. */
+		VM_BUG_ON_PAGE(PageLRU(page), page);
+
 		atomic_inc(&page->dma_pinned_count);
 		return 0;
 	}
@@ -71,7 +95,26 @@ void put_page_for_pinned_dma(struct page *page)
 	 * to use a lock. However, we want to avoid that here. So instead,
 	 * require that...ummm...
 	 */
+	if (PageHuge(page)) {
+		WARN_RATELIMIT(PageHuge(page), "JH:B: trying to dma-pin a HugeTLB page");
+		return;
+	}
+
+	if (PageTransHuge(page)) {
+		WARN_RATELIMIT(PageTransHuge(page), "JH:B: trying to dma-pin a THP");
+		return;
+	}
+
+	VM_BUG_ON_PAGE(PageHuge(page), page);
+	VM_BUG_ON_PAGE(PageTransHuge(page), page);
+	WARN_RATELIMIT(PageTail(page), "JH:B: trying to dma-pin a tail page");
+
+	VM_BUG_ON_PAGE(compound_head(page) != page, page);
+	page = compound_head(page);
+
 	if (unlikely(PageDmaPinned(page))) {
+		VM_BUG_ON_PAGE(PageLRU(page), page);
+
 		if (atomic_dec_and_test(&page->dma_pinned_count))
 			ClearPageDmaPinned(page);
 	}
