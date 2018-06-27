@@ -24,11 +24,11 @@ static int pin_page_for_dma(struct page *page)
 {
 	int ret;
 
-	/* This is heavy weight, but without this call, when it's time to
-	 * move the pages out of the pagevec and into the LRU, that will fail
-	 * on any pages that have PageDmaPinned set.
-	 */
-	lru_add_drain_all();
+	if (PageDmaPinned(page)) {
+		/* Page was not on an LRU list, because it was DMA-pinned. */
+		atomic_inc(&page->dma_pinned_count);
+		return 0;
+	}
 
 	/*
 	 * Note that page->dma_pinned_flags is unioned with page->lru.
@@ -37,56 +37,45 @@ static int pin_page_for_dma(struct page *page)
 	 * is in use. However, setting those flags requires that
 	 * the page is both locked, and also, removed from the LRU.
 	 */
-	lock_page(page);
 	ret = isolate_lru_page(page);
 
-	/* counteract isolate_lru_page's effects: */
-	put_page(page);
+	if (ret == 0) {
+		/* counteract isolate_lru_page's effects: */
+		put_page(page);
+		atomic_set(&page->dma_pinned_count, 1);
 
-	/* Avoid problems later, when freeing the page: */
-	ClearPageActive(page);
-	ClearPageUnevictable(page);
-
-	SetPageDmaPinned(page);
-
-	if (ret == 0 || PageDmaPinned(page)) {
-		/* Case a: Page was on an LRU list. Which means that this
-		 * thread is the first one to get here, so we need to initialize
-		 * the dma_pinned_count.
-		 *
-		 * Case b: Page was not on the LRU list, nor was it DMA-pinned.
-		 * The required actions are the same as for case (a), though.
-		 *
-		 * No need for atomics because both page->dma_pinned_* fields
-		 * are protected by the page lock.
+		/* Set this after initializing the count, above. That way,
+		 * put_page_for_pinned_dma(), racing with this call, will
+		 * not use the count until it is initialized.
 		 */
-		page->dma_pinned_count = 1;
-	} else {
-		/* Case c: Page was not on an LRU list, because it was
-		 * DMA-pinned.
-		 */
-		page->dma_pinned_count++;
+		SetPageDmaPinned(page);
+
 	}
 
-	unlock_page(page);
-
-	return 0;
+	return ret;
 }
 
 void put_page_for_pinned_dma(struct page *page)
 {
 	/* Because the page->dma_pinned_* fields are unioned with
 	 * page->lru, there is no way to do classical refcount-style
-	 * decrement-and-test-for-zero. Instead, the page must be locked,
-	 * in order to safely check if we are allowed to decrement
+	 * decrement-and-test-for-zero. Instead, PageDmaPinned(page) must
+	 * be checked, in order to safely check if we are allowed to decrement
 	 * page->dma_pinned_count at all.
+	 *
+	 * TODO: Because there are two fields here, it would really be accurate
+	 * to use a lock. However, we want to avoid that here. So instead,
+	 * require that...ummm...
 	 */
-	lock_page(page);
 	if (unlikely(PageDmaPinned(page))) {
-		if (0 == --page->dma_pinned_count)
+		if (atomic_dec_and_test(&page->dma_pinned_count)) {
+			/* Avoid problems later, when freeing the page: */
+			ClearPageActive(page);
+			ClearPageUnevictable(page);
+
 			ClearPageDmaPinned(page);
+		}
 	}
-	unlock_page(page);
 }
 EXPORT_SYMBOL(put_page_for_pinned_dma);
 

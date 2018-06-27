@@ -89,8 +89,8 @@ struct page {
 				 * the page lock.
 				 */
 				struct {
-					unsigned long dma_pinned_flags;
-					unsigned long dma_pinned_count;
+					atomic_t dma_pinned_flags;
+					atomic_t dma_pinned_count;
 				};
 			};
 			/* See page-flags.h for PAGE_MAPPING_FLAGS */
