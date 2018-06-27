@@ -453,7 +453,7 @@ static __always_inline void SetPageDmaPinned(struct page *page)
 static __always_inline void ClearPageDmaPinned(struct page *page)
 {
 	page = compound_head(page);
-	VM_BUG_ON(!PageDmaPinnedFlags(page));
+	VM_BUG_ON_PAGE(!PageDmaPinnedFlags(page), page);
 	atomic_set(&page->dma_pinned_flags, 0);
 
 	INIT_LIST_HEAD(&page->lru);
