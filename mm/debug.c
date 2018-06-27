@@ -50,9 +50,12 @@ void __dump_page(struct page *page, const char *reason)
 	 */
 	int mapcount = PageSlab(page) ? 0 : page_mapcount(page);
 
-	pr_emerg("page:%px count:%d mapcount:%d mapping:%px index:%#lx",
+	pr_emerg("page:%px count:%d mapcount:%d mapping:%px index:%#lx, dmac/f:%d(%x)/%lx",
 		  page, page_ref_count(page), mapcount,
-		  page->mapping, page_to_pgoff(page));
+		  page->mapping, page_to_pgoff(page),
+		  atomic_read(&page->dma_pinned_count),
+		  atomic_read(&page->dma_pinned_count),
+		  READ_ONCE(page->dma_pinned_flags));
 	if (PageCompound(page))
 		pr_cont(" compound_mapcount: %d", compound_mapcount(page));
 	pr_cont("\n");

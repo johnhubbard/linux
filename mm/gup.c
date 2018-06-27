@@ -20,6 +20,77 @@
 
 #include "internal.h"
 
+static int pin_page_for_dma(struct page *page)
+{
+	int ret = 0;
+
+	lock_page(page);
+
+	/* Huge pages cannot be split while the refcount is elevated, so
+	 * always refer to the head page.
+	 */
+	page = compound_head(page);
+
+	if (PageDmaPinned(page)) {
+		/* Page was not on an LRU list, because it was DMA-pinned. */
+		VM_BUG_ON_PAGE(PageLRU(page), page);
+
+		atomic_inc(&page->dma_pinned_count);
+		goto unlock_out;
+	}
+
+	/*
+	 * Note that page->dma_pinned_flags is unioned with page->lru.
+	 * Therefore, the rules are: checking if any of the
+	 * PAGE_DMA_PINNED_FLAGS bits are set may be done while page->lru
+	 * is in use. However, setting those flags requires that
+	 * the page is both locked, and also, removed from the LRU.
+	 */
+	ret = isolate_lru_page(page);
+
+	if (ret == 0) {
+		/* Avoid problems later, when freeing the page: */
+		ClearPageActive(page);
+		ClearPageUnevictable(page);
+
+		/* counteract isolate_lru_page's effects: */
+		put_page(page);
+
+		atomic_set(&page->dma_pinned_count, 1);
+		SetPageDmaPinned(page);
+	}
+
+unlock_out:
+	unlock_page(page);
+
+	return ret;
+}
+
+void put_page_for_pinned_dma(struct page *page)
+{
+	/* Because the page->dma_pinned_* fields are unioned with
+	 * page->lru, there is no way to do classical refcount-style
+	 * decrement-and-test-for-zero. Instead, PageDmaPinned(page) must
+	 * be checked, in order to safely check if we are allowed to decrement
+	 * page->dma_pinned_count at all.
+	 */
+	page = compound_head(page);
+
+	if (unlikely(PageDmaPinned(page))) {
+		if (atomic_dec_and_test(&page->dma_pinned_count)) {
+			lock_page(page);
+
+			VM_BUG_ON_PAGE(PageLRU(page), page);
+
+			if (atomic_read(&page->dma_pinned_count) == 0)
+				ClearPageDmaPinned(page);
+
+			unlock_page(page);
+		}
+	}
+}
+EXPORT_SYMBOL(put_page_for_pinned_dma);
+
 static struct page *no_page_table(struct vm_area_struct *vma,
 		unsigned int flags)
 {
@@ -659,7 +730,7 @@ static long __get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
 		unsigned int gup_flags, struct page **pages,
 		struct vm_area_struct **vmas, int *nonblocking)
 {
-	long i = 0;
+	long i = 0, j;
 	int err = 0;
 	unsigned int page_mask;
 	struct vm_area_struct *vma = NULL;
@@ -764,6 +835,10 @@ next_page:
 	} while (nr_pages);
 
 out:
+	if (pages)
+		for (j = 0; j < i; j++)
+			pin_page_for_dma(pages[j]);
+
 	return i ? i : err;
 }
 
@@ -1843,7 +1918,7 @@ int get_user_pages_fast(unsigned long start, int nr_pages, int write,
 			struct page **pages)
 {
 	unsigned long addr, len, end;
-	int nr = 0, ret = 0;
+	int nr = 0, ret = 0, i;
 
 	start &= PAGE_MASK;
 	addr = start;
@@ -1863,6 +1938,9 @@ int get_user_pages_fast(unsigned long start, int nr_pages, int write,
 		local_irq_enable();
 		ret = nr;
 	}
+
+	for (i = 0; i < nr; i++)
+		pin_page_for_dma(pages[i]);
 
 	if (nr < nr_pages) {
 		/* Try to get the remaining pages with get_user_pages */

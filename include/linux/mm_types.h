@@ -85,12 +85,11 @@ struct page {
 				 * generic list by the page owner.
 				 */
 				struct list_head lru;
-				/* Used by get_user_pages*(). Protected by
-				 * the page lock.
-				 */
+
+				/* Used by get_user_pages*(). */
 				struct {
 					unsigned long dma_pinned_flags;
-					unsigned long dma_pinned_count;
+					atomic_t      dma_pinned_count;
 				};
 			};
 			/* See page-flags.h for PAGE_MAPPING_FLAGS */
