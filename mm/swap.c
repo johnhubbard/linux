@@ -863,6 +863,12 @@ static void __pagevec_lru_add_fn(struct page *page, struct lruvec *lruvec,
 
 	VM_BUG_ON_PAGE(PageLRU(page), page);
 
+	/* These kinds of pages expect to stay *off* of the LRU: */
+	if (PageDmaPinned(page)) {
+		WARN_ON_ONCE(PageDmaPinned(page));
+		return;
+	}
+
 	SetPageLRU(page);
 	/*
 	 * Page becomes evictable in two ways:
