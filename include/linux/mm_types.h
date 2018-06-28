@@ -85,11 +85,10 @@ struct page {
 				 * generic list by the page owner.
 				 */
 				struct list_head lru;
-				/* Used by get_user_pages*(). Protected by
-				 * the page lock.
-				 */
+
+				/* Used by get_user_pages*(). */
 				struct {
-					atomic_t PLACEHOLDER_dma_pinned_flags;
+					atomic_t dma_pinned_flags;
 					atomic_t dma_pinned_count;
 				};
 			};
@@ -210,10 +209,6 @@ struct page {
 #ifdef LAST_CPUPID_NOT_IN_PAGE_FLAGS
 	int _last_cpupid;
 #endif
-	struct {
-		atomic_t dma_pinned_flags;
-		//atomic_t dma_pinned_count;
-	};
 } _struct_page_alignment;
 
 #define PAGE_FRAG_CACHE_MAX_SIZE	__ALIGN_MASK(32768, ~PAGE_MASK)
