@@ -33,17 +33,8 @@ static int pin_page_for_dma(struct page *page)
 		return -ENOTSUPP;
 	}
 
-	/* THPs should be supported, but for debugging step 1, omit them: */
-	if (PageTransHuge(page)) {
-		WARN_RATELIMIT(PageTransHuge(page), "JH:A: trying to dma-pin a THP");
-		return -ENOTSUPP;
-	}
-
 	VM_BUG_ON_PAGE(PageHuge(page), page);
-	VM_BUG_ON_PAGE(PageTransHuge(page), page);
-	WARN_RATELIMIT(PageTail(page), "JH:A: trying to dma-pin a tail page");
 
-	VM_BUG_ON_PAGE(compound_head(page) != page, page);
 	page = compound_head(page);
 
 	if (PageDmaPinned(page)) {
@@ -100,14 +91,7 @@ void put_page_for_pinned_dma(struct page *page)
 		return;
 	}
 
-	if (PageTransHuge(page)) {
-		WARN_RATELIMIT(PageTransHuge(page), "JH:B: trying to dma-pin a THP");
-		return;
-	}
-
 	VM_BUG_ON_PAGE(PageHuge(page), page);
-	VM_BUG_ON_PAGE(PageTransHuge(page), page);
-	WARN_RATELIMIT(PageTail(page), "JH:B: trying to dma-pin a tail page");
 
 	VM_BUG_ON_PAGE(compound_head(page) != page, page);
 	page = compound_head(page);
