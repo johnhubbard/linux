@@ -2060,6 +2060,59 @@ static long check_and_migrate_movable_pages(unsigned long nr_pages,
 }
 #endif /* CONFIG_MIGRATION */
 
+static void change_from_lru_to_longterm_pincount(struct folio *folio)
+{
+	folio_isolate_lru(folio);
+
+	/*
+	 * Now that it's removed from the LRU, re-use the folio->lru fields for
+	 * longterm pin tracking.
+	 */
+	folio->longterm_pin_tag = LONGTERM_PIN_TAG;
+	atomic_set(&folio->longterm_pincount, 0);
+}
+
+static bool folio_is_longterm_pinned(struct folio *folio)
+{
+	return folio->longterm_pin_tag == LONGTERM_PIN_TAG;
+}
+
+static long mark_longterm_remove_from_lru(unsigned long nr_pages,
+					  struct page **pages)
+{
+	unsigned long i;
+	unsigned long flags;
+	struct zone *zone;
+
+	for (i = 0; i < nr_pages; i++) {
+		struct folio *folio = page_folio(pages[i]);
+
+		zone = folio_zone(folio);
+
+		spin_lock_irqsave(&zone->lock, flags);
+
+		if (folio_is_longterm_pinned(folio))
+				atomic_inc(&folio->longterm_pincount);
+		else if (folio_test_lru(folio)) {
+			change_from_lru_to_longterm_pincount(folio);
+		} else {
+			/* Try harder to find a potential LRU page: */
+			lru_add_drain_all();
+
+			if (folio_test_lru(folio)) 
+				change_from_lru_to_longterm_pincount(folio);
+			else
+				VM_WARN_ON_ONCE_FOLIO(!folio_test_lru(folio),
+						      folio);
+		}
+
+		spin_unlock_irqrestore(&zone->lock, flags);
+	}
+
+	return 0;
+}
+
+
 /*
  * __gup_longterm_locked() is a wrapper for __get_user_pages_locked which
  * allows us to process the FOLL_LONGTERM flag.
@@ -2093,6 +2146,10 @@ static long __gup_longterm_locked(struct mm_struct *mm,
 		rc = check_and_migrate_movable_pages(nr_pinned_pages, pages);
 	} while (rc == -EAGAIN);
 	memalloc_pin_restore(flags);
+
+	if (rc == 0 && nr_pinned_pages > 0) {
+		mark_longterm_remove_from_lru(nr_pinned_pages, pages);
+	}
 	return rc ? rc : nr_pinned_pages;
 }
 
