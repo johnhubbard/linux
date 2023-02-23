@@ -5,6 +5,7 @@
 #include <linux/ktime.h>
 #include <linux/debugfs.h>
 #include <linux/highmem.h>
+#include <linux/swap.h>
 #include "gup_test.h"
 
 static void put_back_pages(unsigned int cmd, struct page **pages,
@@ -115,6 +116,8 @@ static int __gup_test_ioctl(unsigned int cmd,
 	if (!pages)
 		return -ENOMEM;
 
+	lru_cache_disable();
+
 	if (needs_mmap_lock && mmap_read_lock_killable(current->mm)) {
 		ret = -EINTR;
 		goto free_pages;
@@ -199,6 +202,9 @@ static int __gup_test_ioctl(unsigned int cmd,
 unlock:
 	if (needs_mmap_lock)
 		mmap_read_unlock(current->mm);
+
+	lru_cache_enable();
+
 free_pages:
 	kvfree(pages);
 	return ret;

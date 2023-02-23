@@ -97,7 +97,10 @@ struct page {
 					/* Count page's or folio's mlocks */
 					unsigned int mlock_count;
 				};
-
+				struct {
+					unsigned long longterm_pin_tag;
+					atomic_t longterm_pincount;
+				};
 				/* Or, free page */
 				struct list_head buddy_list;
 				struct list_head pcp_list;
@@ -312,6 +315,10 @@ struct folio {
 	/* public: */
 					unsigned int mlock_count;
 	/* private: */
+				};
+				struct {
+					unsigned long longterm_pin_tag;
+					atomic_t longterm_pincount;
 				};
 	/* public: */
 			};
@@ -1158,6 +1165,10 @@ enum {
 	FOLL_INTERRUPTIBLE = 1 << 11,
 
 	/* See also internal only FOLL flags in mm/internal.h */
+};
+
+enum {
+	LONGTERM_PIN_TAG = 0x2, /* The folio is already longterm pinned. */
 };
 
 #endif /* _LINUX_MM_TYPES_H */

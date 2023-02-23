@@ -1758,6 +1758,16 @@ static inline bool page_maybe_dma_pinned(struct page *page)
 	return folio_maybe_dma_pinned(page_folio(page));
 }
 
+static inline bool folio_is_longterm_pinned(struct folio *folio)
+{
+	return READ_ONCE(folio->longterm_pin_tag) == LONGTERM_PIN_TAG;
+}
+
+static inline bool page_is_longterm_pinned(struct page *page)
+{
+	return folio_is_longterm_pinned(page_folio(page));
+}
+
 /*
  * This should most likely only be called during fork() to see whether we
  * should break the cow immediately for an anon page on the src mm.

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+#include "linux/memcontrol.h"
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/err.h>
@@ -60,6 +61,52 @@ static inline void sanity_check_pinned_pages(struct page **pages,
 			VM_BUG_ON_PAGE(!PageAnonExclusive(&folio->page) &&
 				       !PageAnonExclusive(page), page);
 	}
+}
+
+static void folio_unmark_longterm(struct folio *folio)
+{
+	struct lruvec *lruvec;
+	unsigned long flags;
+
+	VM_WARN_ON_ONCE_FOLIO(!folio_is_longterm_pinned(folio), folio);
+
+	if(atomic_dec_return(&folio->longterm_pincount))
+		return;
+
+	lruvec = folio_lruvec_lock_irqsave(folio, &flags);
+
+	if(atomic_read(&folio->longterm_pincount) == 0) {
+		folio_clear_unevictable(folio);
+		folio_putback_lru(folio);
+	}
+
+	unlock_page_lruvec_irqrestore(lruvec, flags);
+}
+
+static void folio_mark_longterm(struct folio *folio)
+{
+	struct lruvec *lruvec;
+	unsigned long flags;
+
+	lruvec = folio_lruvec_lock_irqsave(folio, &flags);
+
+	if (folio_is_longterm_pinned(folio)) {
+		atomic_inc(&folio->longterm_pincount);
+		goto out_unlock;
+	}
+
+	if (folio_test_clear_lru(folio)) {
+		lruvec_del_folio(lruvec, folio);
+		folio_set_unevictable(folio);
+		folio->longterm_pin_tag = LONGTERM_PIN_TAG;
+		atomic_set(&folio->longterm_pincount, 0);
+	} else {
+		/* Another thread called folio_isolate_lru() first, not good. */
+		VM_WARN_ON_ONCE_FOLIO(!folio_test_lru(folio), folio);
+	}
+
+out_unlock:
+	unlock_page_lruvec_irqrestore(lruvec, flags);
 }
 
 /*
@@ -170,6 +217,9 @@ struct folio *try_grab_folio(struct page *page, int refs, unsigned int flags)
 
 		node_stat_mod_folio(folio, NR_FOLL_PIN_ACQUIRED, refs);
 
+		if (flags & FOLL_LONGTERM)
+			folio_mark_longterm(folio);
+
 		return folio;
 	}
 
@@ -185,6 +235,9 @@ static void gup_put_folio(struct folio *folio, int refs, unsigned int flags)
 			atomic_sub(refs, &folio->_pincount);
 		else
 			refs *= GUP_PIN_COUNTING_BIAS;
+
+		if (flags & FOLL_LONGTERM)
+			folio_unmark_longterm(folio);
 	}
 
 	if (!put_devmap_managed_page_refs(&folio->page, refs))
@@ -237,6 +290,10 @@ int __must_check try_grab_page(struct page *page, unsigned int flags)
 		}
 
 		node_stat_mod_folio(folio, NR_FOLL_PIN_ACQUIRED, 1);
+
+		/* Long term pinning is tracked independently: */
+		if (flags & FOLL_LONGTERM)
+			folio_mark_longterm(folio);
 	}
 
 	return 0;

@@ -154,7 +154,8 @@ static inline bool folio_evictable(struct folio *folio)
 	/* Prevent address_space of inode and swap cache from being freed */
 	rcu_read_lock();
 	ret = !mapping_unevictable(folio_mapping(folio)) &&
-			!folio_test_mlocked(folio);
+			!folio_test_mlocked(folio) &&
+			!folio_is_longterm_pinned(folio);
 	rcu_read_unlock();
 	return ret;
 }
