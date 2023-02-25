@@ -337,9 +337,10 @@ void lruvec_add_folio_tail(struct lruvec *lruvec, struct folio *folio)
 	if (lru_gen_add_folio(lruvec, folio, true))
 		return;
 
+	VM_WARN_ON_ONCE(lru == LRU_UNEVICTABLE);
+
 	update_lru_size(lruvec, lru, folio_zonenum(folio),
 			folio_nr_pages(folio));
-	/* This is not expected to be used on LRU_UNEVICTABLE */
 	list_add_tail(&folio->lru, &lruvec->lists[lru]);
 }
 
