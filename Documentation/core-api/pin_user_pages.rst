@@ -228,20 +228,47 @@ has the following new calls to exercise the new pin*() wrapper functions:
 * PIN_BASIC_TEST (./gup_test -b)
 
 You can monitor how many total dma-pinned pages have been acquired and released
-since the system was booted, via two new /proc/vmstat entries: ::
+since the system was booted, via the following /proc/vmstat entries: ::
 
-    /proc/vmstat/nr_foll_pin_acquired
-    /proc/vmstat/nr_foll_pin_released
+    nr_foll_pin_acquired
+    nr_foll_pin_released
 
-Under normal conditions, these two values will be equal unless there are any
-long-term [R]DMA pins in place, or during pin/unpin transitions.
+The above covers all pins. The next two /proc/vmstat entries count FOLL_LONGTERM
+pins separately: ::
 
-* nr_foll_pin_acquired: This is the number of logical pins that have been
-  acquired since the system was powered on. For huge pages, the head page is
-  pinned once for each page (head page and each tail page) within the huge page.
-  This follows the same sort of behavior that get_user_pages() uses for huge
-  pages: the head page is refcounted once for each tail or head page in the huge
-  page, when get_user_pages() is applied to a huge page.
+    nr_longterm_pin_acquired
+    nr_longterm_pin_released
+
+Under normal conditions, the acquired and released counts will be equal unless
+there are any DMA pins in place, or during pin/unpin transitions.
+
+Examples:
+
+Situation A: there are currently no pages pinned via FOLL_PIN nor
+FOLL_LONGTERM: ::
+
+    nr_foll_pin_acquired     == nr_foll_pin_released
+    nr_longterm_pin_acquired == nr_longterm_pin_released
+
+Situation B: some process has some pages short term pinned (FOLL_PIN), but no
+processes have any long term pins: ::
+
+    nr_foll_pin_acquired      > nr_foll_pin_released
+    nr_longterm_pin_acquired == nr_longterm_pin_released
+
+Situation C: some process has some pages long term pinned (FOLL_LONGTERM).
+Note that FOLL_LONGTERM implies FOLL_PIN, as part of the API
+description. ::
+
+    nr_foll_pin_acquired      > nr_foll_pin_released
+    nr_longterm_pin_acquired  > nr_longterm_pin_released
+
+* nr_foll_pin_acquired: The number of logical pins that have been acquired since
+  the system was powered on. For huge pages, the head page is pinned once for
+  each page (head page and each tail page) within the huge page. This follows
+  the same sort of behavior that get_user_pages() uses for huge pages: the head
+  page is refcounted once for each tail or head page in the huge page, when
+  get_user_pages() is applied to a huge page.
 
 * nr_foll_pin_released: The number of logical pins that have been released since
   the system was powered on. Note that pages are released (unpinned) on a
@@ -259,6 +286,14 @@ long-term [R]DMA pins in place, or during pin/unpin transitions.
 
 (...unless it was already out of balance due to a long-term RDMA pin being in
 place.)
+
+* nr_longterm_pin_acquired: The number of logical FOLL_LONGTERM pins that have
+  been acquired since the system was powered on. The rules for head pages, huge
+  pages are exactly the same as for nr_foll_pin_acquired.
+
+* nr_longterm_pin_released: The number of logical FOLL_LONGTERM pins that have
+  been released since the system was powered on. The rules for head pages, huge
+  pages are exactly the same as for nr_foll_pin_released.
 
 Other diagnostics
 =================
