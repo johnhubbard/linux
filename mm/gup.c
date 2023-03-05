@@ -236,7 +236,7 @@ static void gup_put_folio(struct folio *folio, int refs, unsigned int flags)
 		else
 			refs *= GUP_PIN_COUNTING_BIAS;
 
-		if (flags & FOLL_LONGTERM)
+		if (folio_is_longterm_pinned(folio))
 			folio_unmark_longterm(folio);
 	}
 
