@@ -77,7 +77,7 @@ static void folio_unmark_longterm(struct folio *folio)
 
 	if(atomic_read(&folio->longterm_pincount) == 0) {
 		folio_clear_unevictable(folio);
-		folio_putback_lru(folio);
+		folio_add_lru(folio);
 	}
 
 	unlock_page_lruvec_irqrestore(lruvec, flags);
