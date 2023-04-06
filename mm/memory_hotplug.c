@@ -306,6 +306,7 @@ int __ref __add_pages(int nid, unsigned long pfn, unsigned long nr_pages,
 	unsigned long cur_nr_pages;
 	int err;
 	struct vmem_altmap *altmap = params->altmap;
+	int count = 0;
 
 	if (WARN_ON_ONCE(!pgprot_val(params->pgprot)))
 		return -EINVAL;
@@ -330,6 +331,7 @@ int __ref __add_pages(int nid, unsigned long pfn, unsigned long nr_pages,
 	}
 
 	for (; pfn < end_pfn; pfn += cur_nr_pages) {
+		count++;
 		/* Select all remaining pages up to the next section boundary */
 		cur_nr_pages = min(end_pfn - pfn,
 				   SECTION_ALIGN_UP(pfn + 1) - pfn);
@@ -339,6 +341,8 @@ int __ref __add_pages(int nid, unsigned long pfn, unsigned long nr_pages,
 			break;
 		cond_resched();
 	}
+	printk("JH: %s: count: %d\n", __func__, count);
+
 	vmemmap_populate_print_last();
 	return err;
 }
