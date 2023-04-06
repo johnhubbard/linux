@@ -1157,7 +1157,13 @@ int __meminit vmemmap_check_pmd(pmd_t *pmdp, int node,
 int __meminit vmemmap_populate(unsigned long start, unsigned long end, int node,
 		struct vmem_altmap *altmap)
 {
-	WARN_ON((start < VMEMMAP_START) || (end > VMEMMAP_END));
+	if (WARN_ON_ONCE(start < VMEMMAP_START))
+		printk("JH: %s:%d: start: 0x%lx, end: 0x%lx\n",
+			__func__, __LINE__, start, end);
+
+	if (WARN_ON_ONCE(end > VMEMMAP_END))
+		printk("JH: %s:%d: start: 0x%lx, end: 0x%lx\n",
+			__func__, __LINE__, start, end);
 
 	if (!IS_ENABLED(CONFIG_ARM64_4K_PAGES))
 		return vmemmap_populate_basepages(start, end, node, altmap);
@@ -1169,7 +1175,13 @@ int __meminit vmemmap_populate(unsigned long start, unsigned long end, int node,
 void vmemmap_free(unsigned long start, unsigned long end,
 		struct vmem_altmap *altmap)
 {
-	WARN_ON((start < VMEMMAP_START) || (end > VMEMMAP_END));
+	if (WARN_ON_ONCE(start < VMEMMAP_START))
+		printk("JH: %s:%d: start: 0x%lx, end: 0x%lx\n",
+			__func__, __LINE__, start, end);
+
+	if (WARN_ON_ONCE(end > VMEMMAP_END))
+		printk("JH: %s:%d: start: 0x%lx, end: 0x%lx\n",
+			__func__, __LINE__, start, end);
 
 	unmap_hotplug_range(start, end, true, altmap);
 	free_empty_tables(start, end, VMEMMAP_START, VMEMMAP_END);
