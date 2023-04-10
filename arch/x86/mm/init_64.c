@@ -1540,6 +1540,12 @@ int __meminit vmemmap_populate(unsigned long start, unsigned long end, int node,
 	VM_BUG_ON(!PAGE_ALIGNED(start));
 	VM_BUG_ON(!PAGE_ALIGNED(end));
 
+	WARN_ON_ONCE(start < VMEMMAP_START);
+
+	WARN_ON_ONCE(1);
+	printk("JH: %s:%d: start: 0x%lx, end: 0x%lx\n",
+		__func__, __LINE__, start, end);
+
 	if (end - start < PAGES_PER_SECTION * sizeof(struct page))
 		err = vmemmap_populate_basepages(start, end, node, NULL);
 	else if (boot_cpu_has(X86_FEATURE_PSE))
