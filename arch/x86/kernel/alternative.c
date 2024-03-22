@@ -44,6 +44,7 @@ EXPORT_SYMBOL_GPL(alternatives_patched);
 #define DA_RETPOLINE	0x04
 #define DA_ENDBR	0x08
 #define DA_SMP		0x10
+#define DA_CUSTOM	0x20
 
 static unsigned int __initdata_or_module debug_alternative;
 
@@ -412,7 +413,7 @@ EXPORT_SYMBOL(BUG_func);
  * Rewrite the "call BUG_func" replacement to point to the target of the
  * indirect pv_ops call "call *disp(%ip)".
  */
-static int alt_replace_call(u8 *instr, u8 *insn_buff, struct alt_instr *a)
+static int __maybe_unused alt_replace_call(u8 *instr, u8 *insn_buff, struct alt_instr *a)
 {
 	void *target, *bug = &BUG_func;
 	s32 disp;
@@ -509,6 +510,19 @@ void __init_or_module noinline apply_alternatives(struct alt_instr *start,
 			continue;
 		}
 
+		/* Skip the buggy direct call case for now: */
+		if (a->flags & ALT_FLAG_DIRECT_CALL) {
+			DPRINTK(CUSTOM,
+				"NOT replacing: %d*32+%d, old: (%pS (%px) len: %d), repl: (%px, len: %d) flags: 0x%x",
+				a->cpuid >> 5,
+				a->cpuid & 0x1f,
+				instr, instr, a->instrlen,
+				replacement, a->replacementlen, a->flags);
+
+			optimize_nops_inplace(instr, a->instrlen);
+			continue;
+		}
+
 		DPRINTK(ALT, "feat: %d*32+%d, old: (%pS (%px) len: %d), repl: (%px, len: %d) flags: 0x%x",
 			a->cpuid >> 5,
 			a->cpuid & 0x1f,
@@ -517,12 +531,6 @@ void __init_or_module noinline apply_alternatives(struct alt_instr *start,
 
 		memcpy(insn_buff, replacement, a->replacementlen);
 		insn_buff_sz = a->replacementlen;
-
-		if (a->flags & ALT_FLAG_DIRECT_CALL) {
-			insn_buff_sz = alt_replace_call(instr, insn_buff, a);
-			if (insn_buff_sz < 0)
-				continue;
-		}
 
 		for (; insn_buff_sz < a->instrlen; insn_buff_sz++)
 			insn_buff[insn_buff_sz] = 0x90;
