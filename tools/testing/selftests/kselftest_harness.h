@@ -1207,8 +1207,10 @@ void __run_test(struct __fixture_metadata *f,
 	else
 		diagnostic = "unknown";
 
-	ksft_test_result_code(t->exit_code, test_name,
-			      diagnostic ? "%s" : NULL, diagnostic);
+	if (diagnostic)
+		ksft_test_result_code(t->exit_code, test_name, "%s", diagnostic);
+	else
+		ksft_test_result_code(t->exit_code, test_name, NULL);
 	free(test_name);
 }
 
