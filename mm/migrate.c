@@ -1728,7 +1728,9 @@ static int migrate_pages_batch(struct list_head *from,
 				else
 					goto move;
 			case -EAGAIN:
-				retry++;
+				/* For ZONE_MOVABLE folios, retry forever */
+				if (!folio_is_zone_movable(folio))
+					retry++;
 				thp_retry += is_thp;
 				nr_retry_pages += nr_pages;
 				break;
@@ -1786,7 +1788,9 @@ move:
 			 */
 			switch(rc) {
 			case -EAGAIN:
-				retry++;
+				/* For ZONE_MOVABLE folios, retry forever */
+				if (!folio_is_zone_movable(folio))
+					retry++;
 				thp_retry += is_thp;
 				nr_retry_pages += nr_pages;
 				break;
