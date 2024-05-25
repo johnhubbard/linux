@@ -993,6 +993,7 @@ int __folio_lock_killable(struct folio *folio);
 vm_fault_t __folio_lock_or_retry(struct folio *folio, struct vm_fault *vmf);
 void unlock_page(struct page *page);
 void folio_unlock(struct folio *folio);
+void folio_wake_bit(struct folio *folio, int bit_nr);
 
 /**
  * folio_trylock() - Attempt to lock a folio.
@@ -1109,6 +1110,7 @@ static inline vm_fault_t folio_lock_or_retry(struct folio *folio,
  */
 void folio_wait_bit(struct folio *folio, int bit_nr);
 int folio_wait_bit_killable(struct folio *folio, int bit_nr);
+int folio_wait_migration_killable(struct folio *folio);
 
 /* 
  * Wait for a folio to be unlocked.

@@ -1162,7 +1162,7 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 	return (flags & WQ_FLAG_EXCLUSIVE) != 0;
 }
 
-static void folio_wake_bit(struct folio *folio, int bit_nr)
+void folio_wake_bit(struct folio *folio, int bit_nr)
 {
 	wait_queue_head_t *q = folio_waitqueue(folio);
 	struct wait_page_key key;
@@ -1189,6 +1189,7 @@ static void folio_wake_bit(struct folio *folio, int bit_nr)
 
 	spin_unlock_irqrestore(&q->lock, flags);
 }
+EXPORT_SYMBOL_GPL(folio_wake_bit);
 
 /*
  * A choice of three behaviors for folio_wait_bit_common():
@@ -1452,6 +1453,12 @@ int folio_wait_bit_killable(struct folio *folio, int bit_nr)
 	return folio_wait_bit_common(folio, bit_nr, TASK_KILLABLE, SHARED);
 }
 EXPORT_SYMBOL(folio_wait_bit_killable);
+
+int folio_wait_migration_killable(struct folio *folio)
+{
+	return folio_wait_bit_common(folio, PG_waiters, TASK_KILLABLE, SHARED);
+}
+EXPORT_SYMBOL(folio_wait_migration_killable);
 
 /**
  * folio_put_wait_locked - Drop a reference and wait for it to be unlocked

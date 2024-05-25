@@ -1489,6 +1489,8 @@ static inline __must_check bool try_get_page(struct page *page)
 	return true;
 }
 
+void __folio_wake_waiters(struct folio *folio);
+
 /**
  * folio_put - Decrement the reference count on a folio.
  * @folio: The folio.
@@ -1504,6 +1506,13 @@ static inline __must_check bool try_get_page(struct page *page)
  */
 static inline void folio_put(struct folio *folio)
 {
+	/*
+	 * Used for page migration, which waits for extra page pins to clear
+	 * before proceeding.
+	 */
+	if (folio_test_waiters(folio))
+		__folio_wake_waiters(folio);
+
 	if (folio_put_testzero(folio))
 		__folio_put(folio);
 }

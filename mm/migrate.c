@@ -392,6 +392,28 @@ static int folio_expected_refs(struct address_space *mapping,
 	return refs;
 }
 
+static int wait_for_folio_refcount(struct folio *folio, int expected_count)
+{
+	int ret;
+
+	folio_set_waiters(folio);
+
+	while (folio_ref_count(folio) != expected_count) {
+		printk_ratelimited("%s: waiting for folio %px "
+			"(expected count: %d, actual approx. count %d)\n",
+			__func__, folio, expected_count, folio_ref_count(folio));
+
+		ret = folio_wait_migration_killable(folio);
+
+		printk_ratelimited("%s: folio %px: folio_wait_bit_killable: %s\n",
+				   __func__, folio, ret == 0 ? "OK" : "-EINTR");
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 /*
  * Replace the page in the mapping.
  *
@@ -411,9 +433,12 @@ int folio_migrate_mapping(struct address_space *mapping,
 	long entries, i;
 
 	if (!mapping) {
+		int ret;
+
 		/* Anonymous page without mapping */
-		if (folio_ref_count(folio) != expected_count)
-			return -EAGAIN;
+		ret = wait_for_folio_refcount(folio, expected_count);
+		if (ret)
+			return ret;
 
 		/* No turning back from here */
 		newfolio->index = folio->index;

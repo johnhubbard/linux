@@ -37,6 +37,7 @@
 #include <linux/page_idle.h>
 #include <linux/local_lock.h>
 #include <linux/buffer_head.h>
+#include <linux/pagemap.h>
 
 #include "internal.h"
 
@@ -111,6 +112,12 @@ static void page_cache_release(struct folio *folio)
 	if (lruvec)
 		unlock_page_lruvec_irqrestore(lruvec, flags);
 }
+
+void __folio_wake_waiters(struct folio *folio)
+{
+	folio_wake_bit(folio, PG_waiters);
+}
+EXPORT_SYMBOL(__folio_wake_waiters);
 
 void __folio_put(struct folio *folio)
 {
