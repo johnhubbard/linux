@@ -27,7 +27,7 @@ CFLAGS += -I$(OUTPUT)/tools/include
 LDLIBS += -lelf -lz -lrt -lpthread
 
 # Silence some warnings when compiled with clang
-ifneq ($(LLVM),)
+ifeq ($(SELFTESTS_CC_IS_CLANG),)
 CFLAGS += -Wno-unused-command-line-argument
 endif
 

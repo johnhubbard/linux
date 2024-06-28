@@ -51,6 +51,21 @@ else
 CC := $(CROSS_COMPILE)gcc
 endif # LLVM
 
+# SELFTESTS_CC_IS_CLANG allows subsystem selftests to more accurately control
+# clang-specific behavior, such as compiler options. If CC is an invocation of
+# clang in any form, then SELFTESTS_CC_IS_CLANG will be non-empty. Notes:
+#
+# 1) CC could have been set above, by inferring it from LLVM==1, or externally,
+# from the CC shell environment variable.
+#
+# 2) SELFTESTS_CC_IS_CLANG does not specify which linker is being used. However,
+#    it can still help with linker options, if clang or gcc is used for the
+#    linker front end.
+SELFTESTS_CC_IS_CLANG :=
+ifeq ($(findstring clang,$(CC)),clang)
+    SELFTESTS_CC_IS_CLANG := 1
+endif
+
 ifeq (0,$(MAKELEVEL))
     ifeq ($(OUTPUT),)
 	OUTPUT := $(shell pwd)
