@@ -68,8 +68,7 @@ static ssize_t kpagecount_read(struct file *file, char __user *buf,
 		 */
 		page = pfn_to_online_page(pfn);
 		if (page)
-			mapcount = folio_precise_page_mapcount(page_folio(page),
-							       page);
+			mapcount = folio_precise_page_mapcount(page);
 
 		if (put_user(mapcount, out)) {
 			ret = -EFAULT;

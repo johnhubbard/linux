@@ -161,16 +161,15 @@ unsigned name_to_int(const struct qstr *qstr);
  * folios that are not mapped to user space or are not tracked via the RMAP
  * (e.g., shared zeropage).
  */
-static inline int folio_precise_page_mapcount(struct folio *folio,
-		struct page *page)
+static inline int folio_precise_page_mapcount(struct page *page)
 {
 	int mapcount = atomic_read(&page->_mapcount) + 1;
 
 	/* Handle page_has_type() pages */
 	if (mapcount < PAGE_MAPCOUNT_RESERVE + 1)
 		mapcount = 0;
-	if (folio_test_large(folio))
-		mapcount += folio_entire_mapcount(folio);
+	if (unlikely(PageCompound(page)))
+		mapcount += folio_entire_mapcount(page_folio(page));
 
 	return mapcount;
 }
