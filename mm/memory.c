@@ -1817,6 +1817,7 @@ static void unmap_single_vma(struct mmu_gather *tlb,
 {
 	unsigned long start = max(vma->vm_start, start_addr);
 	unsigned long end;
+	bool mm_read_locked;
 
 	if (start >= vma->vm_end)
 		return;
@@ -1827,8 +1828,15 @@ static void unmap_single_vma(struct mmu_gather *tlb,
 	if (vma->vm_file)
 		uprobe_munmap(vma, start, end);
 
-	if (unlikely(vma->vm_flags & VM_PFNMAP))
+	if (unlikely(vma->vm_flags & VM_PFNMAP)) {
+		if (!mm_wr_locked)
+			mm_read_locked = !mmap_read_trylock(vma->vm_mm);
+
 		untrack_pfn(vma, 0, 0, mm_wr_locked);
+
+		if (!mm_wr_locked && !mm_read_locked)
+			mmap_read_unlock(vma->vm_mm);
+	}
 
 	if (start != end) {
 		if (unlikely(is_vm_hugetlb_page(vma))) {
