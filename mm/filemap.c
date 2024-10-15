@@ -1164,7 +1164,7 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 	return (flags & WQ_FLAG_EXCLUSIVE) != 0;
 }
 
-static void folio_wake_bit(struct folio *folio, int bit_nr)
+void folio_wake_bit(struct folio *folio, int bit_nr)
 {
 	wait_queue_head_t *q = folio_waitqueue(folio);
 	struct wait_page_key key;

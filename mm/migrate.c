@@ -760,8 +760,12 @@ static int __migrate_folio(struct address_space *mapping, struct folio *dst,
 	int rc, expected_count = folio_expected_refs(mapping, src);
 
 	/* Check whether src does not have extra refs before we do more work */
-	if (folio_ref_count(src) != expected_count)
-		return -EAGAIN;
+	if (folio_ref_count(src) != expected_count) {
+		int ret = wait_var_event_killable(&src->page._refcount,
+					folio_ref_count(src) == expected_count);
+		if (ret)
+			return -EAGAIN;
+	}
 
 	rc = folio_mc_copy(dst, src);
 	if (unlikely(rc))

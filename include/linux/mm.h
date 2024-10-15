@@ -1459,6 +1459,13 @@ static inline __must_check bool try_get_page(struct page *page)
 	return true;
 }
 
+static inline bool folio_has_waiters(struct folio *folio)
+{
+	return folio_test_waiters(folio);
+}
+
+void folio_wake_waiters(struct folio *folio);
+
 /**
  * folio_put - Decrement the reference count on a folio.
  * @folio: The folio.
@@ -1474,6 +1481,9 @@ static inline __must_check bool try_get_page(struct page *page)
  */
 static inline void folio_put(struct folio *folio)
 {
+	if (folio_has_waiters(folio))
+		folio_wake_waiters(folio);
+
 	if (folio_put_testzero(folio))
 		__folio_put(folio);
 }

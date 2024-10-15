@@ -60,6 +60,8 @@ struct folio_batch;
 
 void page_writeback_init(void);
 
+void folio_wake_bit(struct folio *folio, int bit_nr);
+
 /*
  * If a 16GB hugetlb folio were mapped by PTEs of all of its 4kB pages,
  * its nr_pages_mapped would be 0x400000: choose the ENTIRELY_MAPPED bit

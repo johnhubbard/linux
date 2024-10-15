@@ -108,6 +108,12 @@ static void page_cache_release(struct folio *folio)
 		unlock_page_lruvec_irqrestore(lruvec, flags);
 }
 
+void folio_wake_waiters(struct folio *folio)
+{
+	folio_wake_bit(folio, PG_waiters);
+}
+EXPORT_SYMBOL(folio_wake_waiters);
+
 void __folio_put(struct folio *folio)
 {
 	if (unlikely(folio_is_zone_device(folio))) {
