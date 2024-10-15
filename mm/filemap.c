@@ -1164,7 +1164,7 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 	return (flags & WQ_FLAG_EXCLUSIVE) != 0;
 }
 
-static void folio_wake_bit(struct folio *folio, int bit_nr)
+static void __folio_wake_bit_core(struct folio *folio, int bit_nr, bool exclusive)
 {
 	wait_queue_head_t *q = folio_waitqueue(folio);
 	struct wait_page_key key;
@@ -1175,7 +1175,11 @@ static void folio_wake_bit(struct folio *folio, int bit_nr)
 	key.page_match = 0;
 
 	spin_lock_irqsave(&q->lock, flags);
-	__wake_up_locked_key(q, TASK_NORMAL, &key);
+
+	if (exclusive)
+		__wake_up_locked_key(q, TASK_NORMAL, &key);
+	else
+		__wake_up_locked_key_non_exclusive(q, TASK_NORMAL, &key);
 
 	/*
 	 * It's possible to miss clearing waiters here, when we woke our page
@@ -1191,6 +1195,23 @@ static void folio_wake_bit(struct folio *folio, int bit_nr)
 
 	spin_unlock_irqrestore(&q->lock, flags);
 }
+
+void folio_wake_bit(struct folio *folio, int bit_nr)
+{
+	__folio_wake_bit_core(folio, bit_nr, true);
+}
+
+void folio_wake_bit_non_exclusive(struct folio *folio)
+{
+	/* HACK: picking a page flag that is hopefully uninvolved here */
+	__folio_wake_bit_core(folio, PG_unevictable, false);
+}
+
+void folio_wake_waiters(struct folio *folio)
+{
+	folio_wake_bit_non_exclusive(folio);
+}
+EXPORT_SYMBOL(folio_wake_waiters);
 
 /*
  * A choice of three behaviors for folio_wait_bit_common():
