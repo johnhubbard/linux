@@ -1115,7 +1115,8 @@ static int hugetlbfs_symlink(struct mnt_idmap *idmap,
 #ifdef CONFIG_MIGRATION
 static int hugetlbfs_migrate_folio(struct address_space *mapping,
 				struct folio *dst, struct folio *src,
-				enum migrate_mode mode)
+				enum migrate_mode mode,
+				enum migrate_reason reason)
 {
 	int rc;
 

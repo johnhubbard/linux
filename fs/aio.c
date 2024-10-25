@@ -405,7 +405,8 @@ static const struct file_operations aio_ring_fops = {
 
 #if IS_ENABLED(CONFIG_MIGRATION)
 static int aio_migrate_folio(struct address_space *mapping, struct folio *dst,
-			struct folio *src, enum migrate_mode mode)
+			struct folio *src, enum migrate_mode mode,
+			enum migrate_reason reason)
 {
 	struct kioctx *ctx;
 	unsigned long flags;

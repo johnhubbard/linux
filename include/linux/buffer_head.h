@@ -279,9 +279,11 @@ int block_truncate_page(struct address_space *, loff_t, get_block_t *);
 
 #ifdef CONFIG_MIGRATION
 extern int buffer_migrate_folio(struct address_space *,
-		struct folio *dst, struct folio *src, enum migrate_mode);
+		struct folio *dst, struct folio *src, enum migrate_mode,
+		enum migrate_reason reason);
 extern int buffer_migrate_folio_norefs(struct address_space *,
-		struct folio *dst, struct folio *src, enum migrate_mode);
+		struct folio *dst, struct folio *src, enum migrate_mode,
+		enum migrate_reason reason);
 #else
 #define buffer_migrate_folio NULL
 #define buffer_migrate_folio_norefs NULL

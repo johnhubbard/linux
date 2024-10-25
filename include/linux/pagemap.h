@@ -1259,7 +1259,8 @@ bool noop_dirty_folio(struct address_space *mapping, struct folio *folio);
 
 #ifdef CONFIG_MIGRATION
 int filemap_migrate_folio(struct address_space *mapping, struct folio *dst,
-		struct folio *src, enum migrate_mode mode);
+		struct folio *src, enum migrate_mode mode,
+		enum migrate_reason reason);
 #else
 #define filemap_migrate_folio NULL
 #endif

@@ -2105,7 +2105,8 @@ out_error:
 
 #ifdef CONFIG_MIGRATION
 int nfs_migrate_folio(struct address_space *mapping, struct folio *dst,
-		struct folio *src, enum migrate_mode mode)
+		struct folio *src, enum migrate_mode mode,
+		enum migrate_reason reason)
 {
 	/*
 	 * If the private flag is set, the folio is currently associated with
@@ -2124,7 +2125,7 @@ int nfs_migrate_folio(struct address_space *mapping, struct folio *dst,
 		folio_wait_private_2(src);
 	}
 
-	return migrate_folio(mapping, dst, src, mode);
+	return migrate_folio(mapping, dst, src, mode, reason);
 }
 #endif
 

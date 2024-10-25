@@ -477,7 +477,8 @@ out:
 
 #ifdef CONFIG_MIGRATION
 static int btree_migrate_folio(struct address_space *mapping,
-		struct folio *dst, struct folio *src, enum migrate_mode mode)
+		struct folio *dst, struct folio *src, enum migrate_mode mode,
+		enum migrate_reason reason)
 {
 	/*
 	 * we can't safely write a btree page from here,
@@ -492,7 +493,7 @@ static int btree_migrate_folio(struct address_space *mapping,
 	if (folio_get_private(src) &&
 	    !filemap_release_folio(src, GFP_KERNEL))
 		return -EAGAIN;
-	return migrate_folio(mapping, dst, src, mode);
+	return migrate_folio(mapping, dst, src, mode, reason);
 }
 #else
 #define btree_migrate_folio NULL

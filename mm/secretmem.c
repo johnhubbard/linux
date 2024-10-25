@@ -147,7 +147,8 @@ static const struct file_operations secretmem_fops = {
 };
 
 static int secretmem_migrate_folio(struct address_space *mapping,
-		struct folio *dst, struct folio *src, enum migrate_mode mode)
+		struct folio *dst, struct folio *src, enum migrate_mode mode,
+		enum migrate_reason reason)
 {
 	return -EBUSY;
 }

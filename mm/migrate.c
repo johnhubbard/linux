@@ -755,16 +755,20 @@ EXPORT_SYMBOL(folio_migrate_flags);
 
 static int __migrate_folio(struct address_space *mapping, struct folio *dst,
 			   struct folio *src, void *src_private,
-			   enum migrate_mode mode)
+			   enum migrate_mode mode, enum migrate_reason reason)
 {
 	int rc, expected_count = folio_expected_refs(mapping, src);
 
 	/* Check whether src does not have extra refs before we do more work */
 	if (folio_ref_count(src) != expected_count) {
-		int ret = wait_var_event_killable(&src->page._refcount,
-					folio_ref_count(src) == expected_count);
-		if (ret)
-			return -EAGAIN;
+		if (reason == MR_LONGTERM_PIN) {
+			wait_var_event_killable(&src->page._refcount,
+					folio_ref_count(src) <= expected_count);
+		}
+		/*
+		 * Even if waiting for the refcount worked, try again.
+		 */
+		return -EAGAIN;
 	}
 
 	rc = folio_mc_copy(dst, src);
@@ -795,10 +799,11 @@ static int __migrate_folio(struct address_space *mapping, struct folio *dst,
  * Folios are locked upon entry and exit.
  */
 int migrate_folio(struct address_space *mapping, struct folio *dst,
-		  struct folio *src, enum migrate_mode mode)
+		  struct folio *src, enum migrate_mode mode,
+		  enum migrate_reason reason)
 {
 	BUG_ON(folio_test_writeback(src));	/* Writeback must be complete */
-	return __migrate_folio(mapping, dst, src, NULL, mode);
+	return __migrate_folio(mapping, dst, src, NULL, mode, reason);
 }
 EXPORT_SYMBOL(migrate_folio);
 
@@ -838,7 +843,7 @@ unlock:
 
 static int __buffer_migrate_folio(struct address_space *mapping,
 		struct folio *dst, struct folio *src, enum migrate_mode mode,
-		bool check_refs)
+		bool check_refs, enum migrate_reason reason)
 {
 	struct buffer_head *bh, *head;
 	int rc;
@@ -846,7 +851,7 @@ static int __buffer_migrate_folio(struct address_space *mapping,
 
 	head = folio_buffers(src);
 	if (!head)
-		return migrate_folio(mapping, dst, src, mode);
+		return migrate_folio(mapping, dst, src, mode, reason);
 
 	/* Check whether page does not have extra refs before we do more work */
 	expected_count = folio_expected_refs(mapping, src);
@@ -883,7 +888,7 @@ recheck_buffers:
 		}
 	}
 
-	rc = filemap_migrate_folio(mapping, dst, src, mode);
+	rc = filemap_migrate_folio(mapping, dst, src, mode, reason);
 	if (rc != MIGRATEPAGE_SUCCESS)
 		goto unlock_buffers;
 
@@ -921,9 +926,10 @@ unlock_buffers:
  * Return: 0 on success or a negative errno on failure.
  */
 int buffer_migrate_folio(struct address_space *mapping,
-		struct folio *dst, struct folio *src, enum migrate_mode mode)
+		struct folio *dst, struct folio *src, enum migrate_mode mode,
+		enum migrate_reason reason)
 {
-	return __buffer_migrate_folio(mapping, dst, src, mode, false);
+	return __buffer_migrate_folio(mapping, dst, src, mode, false, reason);
 }
 EXPORT_SYMBOL(buffer_migrate_folio);
 
@@ -942,17 +948,20 @@ EXPORT_SYMBOL(buffer_migrate_folio);
  * Return: 0 on success or a negative errno on failure.
  */
 int buffer_migrate_folio_norefs(struct address_space *mapping,
-		struct folio *dst, struct folio *src, enum migrate_mode mode)
+		struct folio *dst, struct folio *src, enum migrate_mode mode,
+		enum migrate_reason reason)
 {
-	return __buffer_migrate_folio(mapping, dst, src, mode, true);
+	return __buffer_migrate_folio(mapping, dst, src, mode, true, reason);
 }
 EXPORT_SYMBOL_GPL(buffer_migrate_folio_norefs);
 #endif /* CONFIG_BUFFER_HEAD */
 
 int filemap_migrate_folio(struct address_space *mapping,
-		struct folio *dst, struct folio *src, enum migrate_mode mode)
+		struct folio *dst, struct folio *src, enum migrate_mode mode,
+		enum migrate_reason reason)
 {
-	return __migrate_folio(mapping, dst, src, folio_get_private(src), mode);
+	return __migrate_folio(mapping, dst, src, folio_get_private(src), mode,
+				reason);
 }
 EXPORT_SYMBOL_GPL(filemap_migrate_folio);
 
@@ -1001,7 +1010,8 @@ static int writeout(struct address_space *mapping, struct folio *folio)
  * Default handling if a filesystem does not provide a migration function.
  */
 static int fallback_migrate_folio(struct address_space *mapping,
-		struct folio *dst, struct folio *src, enum migrate_mode mode)
+		struct folio *dst, struct folio *src, enum migrate_mode mode,
+		enum migrate_reason reason)
 {
 	if (folio_test_dirty(src)) {
 		/* Only writeback folios in full synchronous migration */
@@ -1021,7 +1031,7 @@ static int fallback_migrate_folio(struct address_space *mapping,
 	if (!filemap_release_folio(src, GFP_KERNEL))
 		return mode == MIGRATE_SYNC ? -EAGAIN : -EBUSY;
 
-	return migrate_folio(mapping, dst, src, mode);
+	return migrate_folio(mapping, dst, src, mode, reason);
 }
 
 /*
@@ -1036,7 +1046,7 @@ static int fallback_migrate_folio(struct address_space *mapping,
  *  MIGRATEPAGE_SUCCESS - success
  */
 static int move_to_new_folio(struct folio *dst, struct folio *src,
-				enum migrate_mode mode)
+				enum migrate_mode mode, enum migrate_reason reason)
 {
 	int rc = -EAGAIN;
 	bool is_lru = !__folio_test_movable(src);
@@ -1048,7 +1058,7 @@ static int move_to_new_folio(struct folio *dst, struct folio *src,
 		struct address_space *mapping = folio_mapping(src);
 
 		if (!mapping)
-			rc = migrate_folio(mapping, dst, src, mode);
+			rc = migrate_folio(mapping, dst, src, mode, reason);
 		else if (mapping_inaccessible(mapping))
 			rc = -EOPNOTSUPP;
 		else if (mapping->a_ops->migrate_folio)
@@ -1060,9 +1070,10 @@ static int move_to_new_folio(struct folio *dst, struct folio *src,
 			 * for page migration.
 			 */
 			rc = mapping->a_ops->migrate_folio(mapping, dst, src,
-								mode);
+								mode, reason);
 		else
-			rc = fallback_migrate_folio(mapping, dst, src, mode);
+			rc = fallback_migrate_folio(mapping, dst, src, mode,
+							reason);
 	} else {
 		const struct movable_operations *mops;
 
@@ -1367,7 +1378,7 @@ static int migrate_folio_move(free_folio_t put_new_folio, unsigned long private,
 	prev = dst->lru.prev;
 	list_del(&dst->lru);
 
-	rc = move_to_new_folio(dst, src, mode);
+	rc = move_to_new_folio(dst, src, mode, reason);
 	if (rc)
 		goto out;
 
@@ -1522,7 +1533,7 @@ static int unmap_and_move_huge_page(new_folio_t get_new_folio,
 	}
 
 	if (!folio_mapped(src))
-		rc = move_to_new_folio(dst, src, mode);
+		rc = move_to_new_folio(dst, src, mode, reason);
 
 	if (page_was_mapped)
 		remove_migration_ptes(src,
