@@ -2324,10 +2324,20 @@ static unsigned long collect_longterm_unpinnable_folios(
 
 	for (i = 0; i < pofs->nr_entries; i++) {
 		struct folio *folio = pofs_get_folio(pofs, i);
+		struct folio *tmp_folio;
 
+		/*
+		 * Two checks to see if this folio has already been collected.
+		 * The first check is quick, and the second check is thorough.
+		 */
 		if (folio == prev_folio)
 			continue;
 		prev_folio = folio;
+
+		list_for_each_entry(tmp_folio, movable_folio_list, lru) {
+			if (folio == tmp_folio)
+				continue;
+		}
 
 		if (folio_is_longterm_pinnable(folio))
 			continue;
