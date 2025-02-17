@@ -6,6 +6,7 @@ mod driver;
 mod firmware;
 mod gpu;
 mod regs;
+mod timer;
 
 kernel::module_pci_driver! {
     type: driver::NovaCore,

@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
 
+use kernel::device::Device;
+use kernel::types::ARef;
 use kernel::{
     device, devres::Devres, error::code::*, firmware, fmt, pci, prelude::*, str::BStr, str::CString,
 };
 
 use crate::driver::Bar0;
 use crate::regs;
+use crate::timer::Timer;
 use core::fmt;
+use core::time::Duration;
 
 const fn to_lowercase_bytes<const N: usize>(s: &str) -> [u8; N] {
     let src = s.as_bytes();
@@ -201,10 +205,12 @@ impl Firmware {
 /// Structure holding the resources required to operate the GPU.
 #[pin_data]
 pub(crate) struct Gpu {
+    dev: ARef<Device>,
     spec: Spec,
     /// MMIO mapping of PCI BAR 0
     bar: Devres<Bar0>,
     fw: Firmware,
+    timer: Timer,
 }
 
 impl Gpu {
@@ -220,6 +226,33 @@ impl Gpu {
             spec.revision
         );
 
-        Ok(pin_init!(Self { spec, bar, fw }))
+        let dev = pdev.as_ref().into();
+        let timer = Timer::new();
+
+        Ok(pin_init!(Self {
+            dev,
+            spec,
+            bar,
+            fw,
+            timer,
+        }))
+    }
+
+    pub(crate) fn test_timer(&self) -> Result<()> {
+        let bar = self.bar.try_access().ok_or(ENXIO)?;
+
+        dev_info!(&self.dev, "testing timer subdev\n");
+        assert!(matches!(
+            self.timer
+                .wait_on(&bar, Duration::from_millis(10), || Some(())),
+            Ok(())
+        ));
+        assert_eq!(
+            self.timer
+                .wait_on(&bar, Duration::from_millis(10), || Option::<()>::None),
+            Err(ETIMEDOUT)
+        );
+
+        Ok(())
     }
 }

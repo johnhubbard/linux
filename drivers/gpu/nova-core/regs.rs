@@ -53,3 +53,46 @@ impl Boot0 {
         ((self.0 & BOOT0_MAJOR_REV_MASK) >> BOOT0_MAJOR_REV_SHIFT) as u8
     }
 }
+
+const PTIMER_TIME_0: usize = 0x00009400;
+const PTIMER_TIME_1: usize = 0x00009410;
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(crate) struct PtimerTime0(u32);
+
+impl PtimerTime0 {
+    #[inline]
+    pub(crate) fn read(bar: &Bar0) -> Self {
+        Self(bar.readl(PTIMER_TIME_0))
+    }
+
+    #[inline]
+    pub(crate) fn write(bar: &Bar0, val: u32) {
+        bar.writel(val, PTIMER_TIME_0)
+    }
+
+    #[inline]
+    pub(crate) fn lo(&self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(crate) struct PtimerTime1(u32);
+
+impl PtimerTime1 {
+    #[inline]
+    pub(crate) fn read(bar: &Bar0) -> Self {
+        Self(bar.readl(PTIMER_TIME_1))
+    }
+
+    #[inline]
+    pub(crate) fn write(bar: &Bar0, val: u32) {
+        bar.writel(val, PTIMER_TIME_1)
+    }
+
+    #[inline]
+    pub(crate) fn hi(&self) -> u32 {
+        self.0
+    }
+}
