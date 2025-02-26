@@ -1,0 +1,14 @@
+Notes about the nova-core-unstable branch:
+
+* Based on upstream commit ac9c34d1e45a ("Merge tag 'for-linus' of
+  git://git.kernel.org/pub/scm/linux/kernel/git/rdma/rdma") (Tues, Feb 25, 2025)
+
+Contains:
+* Danilo Krummrich's v4 series:
+    https://lore.kernel.org/20250226175552.29381-1-dakr@kernel.org
+
+* Alexandre Courbot's v3 series:
+    https://lore.kernel.org/20250217-nova_timer-v1-0-78c5ace2d987@nvidia.com
+
+Testing:
+* It builds on my system.
