@@ -31,6 +31,12 @@ impl BStr {
         // SAFETY: `BStr` is transparent to `[u8]`.
         unsafe { &*(bytes as *const [u8] as *const BStr) }
     }
+
+    /// Same as `self.deref()`, but works in const context.
+    #[inline]
+    pub const fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 impl fmt::Display for BStr {
