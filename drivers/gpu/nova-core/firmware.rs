@@ -120,9 +120,9 @@ pub(crate) struct Firmware {
     /// Runs on the sec2 falcon engine to stop and unload a running GSP firmware.
     booter_unloader: BooterFirmware,
     /// GSP bootloader, verifies the GSP firmware before loading and running it.
-    bootloader: RiscvFirmware,
+    pub bootloader: RiscvFirmware,
     /// GSP firmware.
-    gsp: GspFirmware,
+    pub gsp: GspFirmware,
     /// GSP signatures, to be passed as parameter to the bootloader for validation.
     gsp_sigs: DmaObject,
 }
