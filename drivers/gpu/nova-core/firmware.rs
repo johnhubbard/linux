@@ -10,6 +10,7 @@ use kernel::firmware;
 use kernel::prelude::*;
 use kernel::str::CString;
 use kernel::transmute::FromBytesSized;
+use riscv::RiscvFirmware;
 use sec2::Sec2Firmware;
 
 use crate::dma::DmaObject;
@@ -20,6 +21,7 @@ use crate::gpu;
 use crate::gpu::Chipset;
 
 pub(crate) mod fwsec;
+pub(crate) mod riscv;
 pub(crate) mod sec2;
 
 pub(crate) const FIRMWARE_VERSION: &str = "535.113.01";
@@ -29,7 +31,7 @@ pub(crate) const FIRMWARE_VERSION: &str = "535.113.01";
 pub(crate) struct Firmware {
     booter_load: Sec2Firmware,
     booter_unload: Sec2Firmware,
-    bootloader: firmware::Firmware,
+    bootloader: RiscvFirmware,
     gsp: firmware::Firmware,
 }
 
@@ -54,7 +56,7 @@ impl Firmware {
                 .and_then(|fw| Sec2Firmware::new(sec2, dev, bar, &fw))?,
             booter_unload: request("booter_unload")
                 .and_then(|fw| Sec2Firmware::new(sec2, dev, bar, &fw))?,
-            bootloader: request("bootloader")?,
+            bootloader: request("bootloader").and_then(|fw| RiscvFirmware::new(dev, &fw))?,
             gsp: request("gsp")?,
         })
     }
@@ -207,6 +209,26 @@ struct HsLoadHeaderV2App {
     pub len: u32,
 }
 unsafe impl FromBytesSized for HsLoadHeaderV2App {}
+
+#[repr(C)]
+#[derive(Debug)]
+struct RmRiscvUCodeDesc {
+    version: u32,
+    bootloader_offset: u32,
+    bootloader_size: u32,
+    bootloader_param_offset: u32,
+    bootloader_param_size: u32,
+    riscv_elf_offset: u32,
+    riscv_elf_size: u32,
+    app_version: u32,
+    manifest_offset: u32,
+    manifest_size: u32,
+    monitor_data_offset: u32,
+    monitor_data_size: u32,
+    monitor_code_offset: u32,
+    monitor_code_size: u32,
+}
+unsafe impl FromBytesSized for RmRiscvUCodeDesc {}
 
 pub(crate) struct ModInfoBuilder<const N: usize>(firmware::ModInfoBuilder<N>);
 
