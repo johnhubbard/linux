@@ -10,7 +10,7 @@ use kernel::device;
 use kernel::firmware;
 use kernel::prelude::*;
 use kernel::str::CString;
-use kernel::transmute::FromBytesSized;
+use kernel::transmute::{FromBytes, FromBytesSized};
 use radix3::RadixFirmware;
 use riscv::RiscvFirmware;
 use sec2::Sec2Firmware;
@@ -90,6 +90,7 @@ pub(crate) struct Firmware {
     pub bootloader: RiscvFirmware,
     pub gsp: RadixFirmware,
     pub gsp_sigs: DmaObject,
+    pub gsp_desc: RmRiscvUCodeDesc,
 }
 
 impl Firmware {
@@ -109,9 +110,27 @@ impl Firmware {
         };
 
         let gsp_fw = request("gsp")?;
-        let gsp = elf_section(gsp_fw.data(), ".fwimage")
-            .ok_or(EINVAL)
-            .and_then(|data| RadixFirmware::new(dev, ".fwimage", data))?;
+
+        let (gsp, gsp_desc) = {
+            // Extract the .fwimage section for the GSP firmware
+            let data = elf_section(gsp_fw.data(), ".fwimage").ok_or(EINVAL)?;
+
+            let gsp = RadixFirmware::new(dev, ".fwimage", data)?;
+
+            // Extract RISC-V ucode descriptor
+            let hdr = data
+                .get(0..size_of::<BinHdr>())
+                .and_then(BinHdr::from_bytes_copy)
+                .ok_or(EINVAL)?;
+
+            let offset = hdr.header_offset as usize;
+            let desc = data
+                .get(offset..offset + size_of::<RmRiscvUCodeDesc>())
+                .and_then(RmRiscvUCodeDesc::from_bytes_copy)
+                .ok_or(EINVAL)?;
+
+            (gsp, desc)
+        };
 
         // TODO: make this a GPU-specific const.
         let gsp_sigs_section = ".fwsignature_ga10x";
@@ -127,6 +146,7 @@ impl Firmware {
             bootloader: request("bootloader").and_then(|fw| RiscvFirmware::new(dev, &fw))?,
             gsp,
             gsp_sigs,
+            gsp_desc,
         })
     }
 }
@@ -281,7 +301,7 @@ unsafe impl FromBytesSized for HsLoadHeaderV2App {}
 
 #[repr(C)]
 #[derive(Debug)]
-struct RmRiscvUCodeDesc {
+pub(crate) struct RmRiscvUCodeDesc {
     version: u32,
     bootloader_offset: u32,
     bootloader_size: u32,
