@@ -16,7 +16,7 @@ use core::ops::Deref;
 
 use kernel::device::{self, Device};
 use kernel::prelude::*;
-use kernel::transmute::FromBytes;
+use kernel::transmute::{FromBytes, FromBytesSized};
 
 use crate::dma::DmaObject;
 use crate::driver::Bar0;
@@ -36,7 +36,7 @@ struct FalconAppifHdrV1 {
     entry_count: u8,
 }
 // SAFETY: any byte sequence is valid for this struct.
-unsafe impl FromBytes for FalconAppifHdrV1 {}
+unsafe impl FromBytesSized for FalconAppifHdrV1 {}
 
 #[repr(C, packed)]
 #[derive(Debug)]
@@ -45,7 +45,7 @@ struct FalconAppifV1 {
     dmem_base: u32,
 }
 // SAFETY: any byte sequence is valid for this struct.
-unsafe impl FromBytes for FalconAppifV1 {}
+unsafe impl FromBytesSized for FalconAppifV1 {}
 
 #[derive(Debug)]
 #[repr(C, packed)]
@@ -69,7 +69,7 @@ struct FalconAppifDmemmapperV3 {
     multi_tgt_tbl: u32,
 }
 // SAFETY: any byte sequence is valid for this struct.
-unsafe impl FromBytes for FalconAppifDmemmapperV3 {}
+unsafe impl FromBytesSized for FalconAppifDmemmapperV3 {}
 
 #[derive(Debug)]
 #[repr(C, packed)]
@@ -81,7 +81,7 @@ struct ReadVbios {
     flags: u32,
 }
 // SAFETY: any byte sequence is valid for this struct.
-unsafe impl FromBytes for ReadVbios {}
+unsafe impl FromBytesSized for ReadVbios {}
 
 #[derive(Debug)]
 #[repr(C, packed)]
@@ -93,7 +93,7 @@ struct FrtsRegion {
     ftype: u32,
 }
 // SAFETY: any byte sequence is valid for this struct.
-unsafe impl FromBytes for FrtsRegion {}
+unsafe impl FromBytesSized for FrtsRegion {}
 
 const NVFW_FRTS_CMD_REGION_TYPE_FB: u32 = 2;
 
@@ -103,7 +103,7 @@ struct FrtsCmd {
     frts_region: FrtsRegion,
 }
 // SAFETY: any byte sequence is valid for this struct.
-unsafe impl FromBytes for FrtsCmd {}
+unsafe impl FromBytesSized for FrtsCmd {}
 
 const NVFW_FALCON_APPIF_DMEMMAPPER_CMD_FRTS: u32 = 0x15;
 const NVFW_FALCON_APPIF_DMEMMAPPER_CMD_SB: u32 = 0x19;
@@ -126,7 +126,7 @@ const BCRT30_RSA3K_SIG_SIZE: usize = 384;
 pub(crate) struct Bcrt30Rsa3kSignature([u8; BCRT30_RSA3K_SIG_SIZE]);
 
 /// SAFETY: A signature is just an array of bytes.
-unsafe impl FromBytes for Bcrt30Rsa3kSignature {}
+unsafe impl FromBytesSized for Bcrt30Rsa3kSignature {}
 
 impl From<[u8; BCRT30_RSA3K_SIG_SIZE]> for Bcrt30Rsa3kSignature {
     fn from(sig: [u8; BCRT30_RSA3K_SIG_SIZE]) -> Self {
@@ -153,20 +153,11 @@ impl FirmwareSignature<FwsecFirmware> for Bcrt30Rsa3kSignature {}
 /// TODO[TRSM][COHA]: Remove this and `transmute_mut` once `CoherentAllocation::as_slice` is
 /// available and we have a way to transmute objects implementing FromBytes, e.g.:
 /// https://lore.kernel.org/lkml/20250330234039.29814-1-christiansantoslima21@gmail.com/
-unsafe fn transmute<'a, 'b, T: Sized + FromBytes>(
-    fw: &'a DmaObject,
-    offset: usize,
-) -> Result<&'b T> {
-    if offset + size_of::<T>() > fw.size() {
-        return Err(EINVAL);
+unsafe fn transmute<T: Sized + FromBytes>(fw: &DmaObject, offset: usize) -> Result<&T> {
+    unsafe {
+        fw.as_slice(offset, size_of::<T>())
+            .and_then(move |s| T::from_bytes(s).ok_or(EINVAL))
     }
-    if (fw.start_ptr() as usize + offset) % align_of::<T>() != 0 {
-        return Err(EINVAL);
-    }
-
-    // SAFETY: we have checked that the pointer is properly aligned that its pointed memory is
-    // large enough the contains an instance of `T`, which implements `FromBytes`.
-    Ok(unsafe { &*(fw.start_ptr().add(offset).cast::<T>()) })
 }
 
 /// Reinterpret the area starting from `offset` in `fw` as a mutable instance of `T` (which must
@@ -280,12 +271,11 @@ impl FirmwareDmaObject<FwsecFirmware, Unsigned> {
                 continue;
             }
 
+            let dmem_base = app.dmem_base;
+
             // SAFETY: we have exclusive access to `dma_object`.
             let dmem_mapper: &mut FalconAppifDmemmapperV3 = unsafe {
-                transmute_mut(
-                    &mut dma_object,
-                    (desc.imem_load_size + app.dmem_base) as usize,
-                )
+                transmute_mut(&mut dma_object, (desc.imem_load_size + dmem_base) as usize)
             }?;
 
             // SAFETY: we have exclusive access to `dma_object`.

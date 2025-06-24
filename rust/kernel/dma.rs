@@ -455,7 +455,7 @@ unsafe impl<T: AsBytes + FromBytes + Send> Send for CoherentAllocation<T> {}
 /// struct MyStruct { field: u32, }
 ///
 /// // SAFETY: All bit patterns are acceptable values for `MyStruct`.
-/// unsafe impl kernel::transmute::FromBytes for MyStruct{};
+/// unsafe impl kernel::transmute::FromBytesSized for MyStruct{};
 /// // SAFETY: Instances of `MyStruct` have no uninitialized portions.
 /// unsafe impl kernel::transmute::AsBytes for MyStruct{};
 ///
@@ -499,7 +499,7 @@ macro_rules! dma_read {
 /// struct MyStruct { member: u32, }
 ///
 /// // SAFETY: All bit patterns are acceptable values for `MyStruct`.
-/// unsafe impl kernel::transmute::FromBytes for MyStruct{};
+/// unsafe impl kernel::transmute::FromBytesSized for MyStruct{};
 /// // SAFETY: Instances of `MyStruct` have no uninitialized portions.
 /// unsafe impl kernel::transmute::AsBytes for MyStruct{};
 ///
