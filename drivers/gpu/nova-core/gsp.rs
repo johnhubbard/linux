@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
+use kernel::alloc::flags::GFP_KERNEL;
 use kernel::bindings;
 use kernel::device;
 use kernel::dma::CoherentAllocation;
@@ -10,7 +11,10 @@ use kernel::transmute::{AsBytes, FromBytes};
 
 use crate::fb::FbLayout;
 use crate::firmware::Firmware;
+use crate::gsp::cmdq::GspCmdq;
 use crate::nvfw::r570_144 as fw;
+
+pub(crate) mod cmdq;
 
 pub(crate) const GSP_PAGE_SHIFT: usize = 12;
 pub(crate) const GSP_PAGE_SIZE: usize = 1 << GSP_PAGE_SHIFT;
@@ -39,6 +43,7 @@ pub(crate) struct GspMemObjects {
     pub logintr: CoherentAllocation<u8>,
     pub logrm: CoherentAllocation<u8>,
     pub wpr_meta: CoherentAllocation<fw::GspFwWprMeta>,
+    pub cmdq: GspCmdq,
 }
 
 pub(crate) fn build_wpr_meta(
@@ -109,7 +114,7 @@ fn id8(name: &str) -> u64 {
 }
 
 /// Creates a self-mapping page table for `obj` at its beginning.
-fn create_pte_array(obj: &mut CoherentAllocation<u8>) {
+fn create_pte_array<T: AsBytes + FromBytes>(obj: &mut CoherentAllocation<T>, skip: usize) {
     let num_pages = obj.size().div_ceil(GSP_PAGE_SIZE);
     let handle = obj.dma_handle();
 
@@ -121,7 +126,7 @@ fn create_pte_array(obj: &mut CoherentAllocation<u8>) {
     //  - The allocation size is at least as long as 8 * num_pages as
     //    GSP_PAGE_SIZE is larger than 8 bytes.
     let ptes = unsafe {
-        let ptr = obj.start_ptr_mut().cast::<u64>().add(1);
+        let ptr = obj.start_ptr_mut().cast::<u64>().add(skip);
         core::slice::from_raw_parts_mut(ptr, num_pages)
     };
 
@@ -167,13 +172,15 @@ impl GspMemObjects {
             GFP_KERNEL | __GFP_ZERO,
         )?;
         let mut loginit = create_coherent_dma_object::<u8>(dev, "LOGINIT", 0x10000, &mut libos, 0)?;
-        create_pte_array(&mut loginit);
+        create_pte_array(&mut loginit, 1);
         let mut logintr = create_coherent_dma_object::<u8>(dev, "LOGINTR", 0x10000, &mut libos, 1)?;
-        create_pte_array(&mut logintr);
+        create_pte_array(&mut logintr, 1);
         let mut logrm = create_coherent_dma_object::<u8>(dev, "LOGRM", 0x10000, &mut libos, 2)?;
-        create_pte_array(&mut logrm);
-
+        create_pte_array(&mut logrm, 1);
         let wpr_meta = build_wpr_meta(dev, fw, fb_layout)?;
+
+        // Creates its own PTE array
+        let cmdq = GspCmdq::new(dev)?;
 
         Ok(GspMemObjects {
             libos,
@@ -181,6 +188,7 @@ impl GspMemObjects {
             logintr,
             logrm,
             wpr_meta,
+            cmdq,
         })
     }
 
