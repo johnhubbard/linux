@@ -82,6 +82,30 @@ fn elf_section<'a, 'b>(elf: &'a [u8], name: &'b str) -> Option<&'a [u8]> {
         })
 }
 
+fn get_signature_section(chipset: Chipset) -> Result<&'static str> {
+    match chipset.arch() {
+        gpu::Architecture::Turing => Ok(".fwsignature_tu10x"),
+        gpu::Architecture::Ampere => Ok(".fwsignature_ga10x"),
+        gpu::Architecture::Hopper => Ok(".fwsignature_gh10x"),
+        gpu::Architecture::Ada => Ok(".fwsignature_ad10x"),
+        gpu::Architecture::Blackwell => {
+            // Distinguish between GB10x and GB20x series
+            match chipset {
+                // GB10x series: GB100, GB102
+                Chipset::GB100 | Chipset::GB102 => Ok(".fwsignature_gb10x"),
+                // GB20x series: GB202, GB203, GB205, GB206, GB207
+                Chipset::GB202
+                | Chipset::GB203
+                | Chipset::GB205
+                | Chipset::GB206
+                | Chipset::GB207 => Ok(".fwsignature_gb20x"),
+                // Unsupported Blackwell chips
+                _ => Err(ENOTSUPP),
+            }
+        }
+    }
+}
+
 /// Structure encapsulating the firmware blobs required for the GPU to operate.
 #[expect(dead_code)]
 pub(crate) struct Firmware {
@@ -132,13 +156,8 @@ impl Firmware {
             (gsp, desc)
         };
 
-        // Architecture-specific firmware signature section
-        let gsp_sigs_section = match chipset.arch() {
-            gpu::Architecture::Ampere => ".fwsignature_ga10x",
-            gpu::Architecture::Hopper => ".fwsignature_gh10x",
-            gpu::Architecture::Ada => ".fwsignature_ad10x",
-            _ => return Err(ENOTSUPP),
-        };
+        let gsp_sigs_section = get_signature_section(chipset)?;
+
         let gsp_sigs = elf_section(gsp_fw.data(), gsp_sigs_section)
             .ok_or(EINVAL)
             .and_then(|data| DmaObject::from_data(dev, data))?;
