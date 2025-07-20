@@ -247,6 +247,16 @@ impl FbLayout {
             wpr2.start - HEAP_SIZE..wpr2.start
         };
 
+        // Calculate rsvd_size
+        let heap_size = (heap.end - heap.start) as u64;
+        let pmu_reserved_size = calc_pmu_reserved_size();
+
+        let rsvd_size = {
+            let total = heap_size + pmu_reserved_size;
+            const RSVD_ALIGN: Alignment = Alignment::new(0x200000); // 2MB
+            total.align_up(RSVD_ALIGN).ok_or(EINVAL)?
+        };
+
         Ok(Self {
             fb,
             vga_workspace,
@@ -259,7 +269,24 @@ impl FbLayout {
             vf_partition_count: 0,
             region: Default::default(),
             nr_region: 0,
-            rsvd_size: 0,
+            rsvd_size: rsvd_size as u32,
         })
     }
+}
+
+/// Calculate PMU reserved size
+///
+/// PMU reserved size calculation:
+/// .rsvd_size_pmu = ALIGN(0x0800000 + 0x1000000 + 0x0001000, 0x20000)
+/// = ALIGN(8MB + 16MB + 4KB, 128KB) = approximately 24MB
+pub(crate) fn calc_pmu_reserved_size() -> u64 {
+    use kernel::ptr::Alignment;
+
+    const PMU_BASE_SIZE: u64 = 0x0800000; // 8MB
+    const PMU_EXTRA_SIZE: u64 = 0x1000000; // 16MB
+    const PMU_OVERHEAD: u64 = 0x0001000; // 4KB
+    const PMU_ALIGN: Alignment = Alignment::new(0x20000); // 128KB
+
+    let total = PMU_BASE_SIZE + PMU_EXTRA_SIZE + PMU_OVERHEAD;
+    total.align_up(PMU_ALIGN).unwrap_or(total)
 }
