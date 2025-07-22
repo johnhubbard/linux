@@ -11,6 +11,7 @@ mod firmware;
 mod gfw;
 mod gpu;
 mod gsp;
+mod irq;
 mod nvfw;
 mod regs;
 mod rm;
