@@ -393,9 +393,17 @@ impl Gpu {
             Some(libos_handle as u32),
             Some((libos_handle >> 32) as u32),
         )?;
-        dev_info!(pdev.as_ref(), "MBOX: {:#x},{:#x}\n", mbox0, mbox1,);
+        dev_dbg!(
+            pdev.as_ref(),
+            "GSP MBOX0: {:#x}, MBOX1: {:#x}\n",
+            mbox0,
+            mbox1
+        );
 
-        pr_info!("Trying to run Booter loader...\n");
+        dev_dbg!(
+            pdev.as_ref(),
+            "Using SEC2 to load and run the booter_load firmware...\n"
+        );
 
         sec2_falcon.reset(&bar)?;
         sec2_falcon.dma_load(&bar, &fw.booter_load)?;
@@ -404,7 +412,12 @@ impl Gpu {
             Some(wpr_handle as u32),
             Some((wpr_handle >> 32) as u32),
         )?;
-        dev_info!(pdev.as_ref(), "MBOX: {:#x},{:#x}\n", mbox0, mbox1,);
+        dev_dbg!(
+            pdev.as_ref(),
+            "SEC2 MBOX0: {:#x}, MBOX1{:#x}\n",
+            mbox0,
+            mbox1
+        );
 
         // Match what Nouveau does here:
         gsp_falcon.write_os_version(&bar, fw.gsp_desc.app_version())?;
@@ -418,7 +431,7 @@ impl Gpu {
             }
         })?;
 
-        dev_info!(
+        dev_dbg!(
             pdev.as_ref(),
             "RISC-V active? {}\n",
             gsp_falcon.is_riscv_active(&bar)?,
@@ -459,19 +472,19 @@ impl Gpu {
             "GPU name: {}\n",
             util::str_from_null_terminated(&gsp_info.gpu_name)
         );
-        dev_info!(
+        dev_dbg!(
             pdev.as_ref(),
             "FB regions: {} usable regions found\n",
             gsp_info.fb_region_count
         );
         for (i, region) in gsp_info.fb_regions.iter().enumerate() {
-            dev_info!(
+            dev_dbg!(
                 pdev.as_ref(),
                 "  Region {}: addr={:#x} size={:#x} ({} MB)\n",
                 i, region.addr, region.size, region.size / (1024 * 1024)
             );
         }
-        dev_info!(
+        dev_dbg!(
             pdev.as_ref(),
             "BAR page directories: BAR1_PDB={:#x} BAR2_PDB={:#x}\n",
             gsp_info.bar1_pdb,
