@@ -7,15 +7,17 @@
 use core::borrow::{Borrow, BorrowMut};
 
 use crate::{
+    alloc::KVec,
     bindings,
     device::{Bound, Device},
     dma::DmaDataDirection,
-    error::{Error, Result},
-    page::Page,
+    error::{self, Error, Result},
+    page::{PAGE_MASK, PAGE_SIZE},
     types::{ARef, Opaque},
 };
 
-/// A single scatter-gather entry, representing a span of pages in the device's DMA address space.
+/// A single mapped scatter-gather entry, representing a span of pages in the device's DMA address
+/// space.
 ///
 /// This interface is accessible only via the `SGTable` iterators. When using the API safely, certain
 /// methods are only available depending on a specific state of operation of the scatter-gather table,
@@ -37,24 +39,9 @@ impl SGEntry {
     ///
     /// Callers must ensure that the `struct scatterlist` pointed to by `ptr` is valid for the lifetime
     /// of the returned reference.
-    pub(crate) unsafe fn as_ref<'a>(ptr: *mut bindings::scatterlist) -> &'a Self {
+    unsafe fn as_ref<'a>(ptr: *mut bindings::scatterlist) -> &'a Self {
         // SAFETY: The pointer is valid and guaranteed by the safety requirements of the function.
         unsafe { &*ptr.cast() }
-    }
-
-    /// Convert a raw `struct scatterlist *` to a `&'a mut SGEntry`.
-    ///
-    /// This is meant as a helper for other kernel subsystems and not to be used by device drivers directly.
-    ///
-    /// # Safety
-    ///
-    /// See safety requirements of [`SGEntry::as_ref`]. In addition, callers must ensure that only
-    /// a single mutable reference can be taken from the same raw pointer, i.e. for the lifetime of the
-    /// returned reference, no other call to this function on the same `struct scatterlist *` should
-    /// be permitted.
-    pub(crate) unsafe fn as_mut<'a>(ptr: *mut bindings::scatterlist) -> &'a mut Self {
-        // SAFETY: The pointer is valid and guaranteed by the safety requirements of the function.
-        unsafe { &mut *ptr.cast() }
     }
 
     /// Obtain the raw `struct scatterlist *`.
@@ -72,14 +59,6 @@ impl SGEntry {
     pub fn dma_len(&self) -> u32 {
         // SAFETY: By the type invariant of `SGEntry`, ptr is valid.
         unsafe { bindings::sg_dma_len(self.0.get()) }
-    }
-
-    /// Internal constructor helper to set this entry to point at a given page. Not to be used directly.
-    fn set_page(&mut self, page: &Page, length: u32, offset: u32) {
-        let c: *mut bindings::scatterlist = self.0.get();
-        // SAFETY: according to the `SGEntry` invariant, the scatterlist pointer is valid.
-        // `Page` invariant also ensure the pointer is valid.
-        unsafe { bindings::sg_set_page(c, page.as_ptr(), length, offset) };
     }
 }
 
@@ -156,6 +135,16 @@ pub struct SGTable<T: Borrow<bindings::sg_table>, M: MappingState> {
     table: T,
 }
 
+impl<T, M> AsRef<bindings::sg_table> for SGTable<T, M>
+where
+    T: Borrow<bindings::sg_table>,
+    M: MappingState,
+{
+    fn as_ref(&self) -> &bindings::sg_table {
+        self.table.borrow()
+    }
+}
+
 impl<T> SGTable<T, Unmapped>
 where
     T: Borrow<bindings::sg_table>,
@@ -214,13 +203,42 @@ pub trait SGTablePages {
     /// build the `SGTable`. The first element in the tuple is a reference to the Page, the second element
     /// as the offset into the page, and the third as the length of data. The fields correspond to the
     /// first three fields of the C `struct scatterlist`.
-    fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a Page, usize, usize)>;
+    fn iter(&self) -> impl Iterator<Item = *mut bindings::page>;
+
+    /// Returns the offset from the start of the first page to the start of the buffer.
+    fn offset(&self) -> usize;
+
+    /// Returns the number of valid bytes in the buffer, after [`SGTablePages::offset`].
+    fn size(&self) -> usize;
 
     /// Returns the number of pages in the list.
-    fn entries(&self) -> usize;
+    fn num_pages(&self) -> usize {
+        (self.offset() + self.size()).div_ceil(PAGE_SIZE)
+    }
 }
 
-/// An iterator through `SGTable` entries.
+impl<T> SGTablePages for kernel::alloc::VVec<T> {
+    fn iter(&self) -> impl Iterator<Item = *mut bindings::page> {
+        (0..self.num_pages())
+            .into_iter()
+            .map(|page_idx| unsafe {
+                self.as_ptr()
+                    .cast::<u8>()
+                    .offset((PAGE_SIZE * page_idx) as isize)
+            })
+            .map(|ptr| unsafe { bindings::vmalloc_to_page(ptr.cast()) })
+    }
+
+    fn offset(&self) -> usize {
+        self.as_ptr() as usize & (!PAGE_MASK)
+    }
+
+    fn size(&self) -> usize {
+        self.len() * size_of::<T>()
+    }
+}
+
+/// An iterator through the entries of a mapped `SGTable`.
 pub struct SGTableIter<'a> {
     pos: Option<&'a SGEntry>,
 }
@@ -229,28 +247,20 @@ impl<'a> Iterator for SGTableIter<'a> {
     type Item = &'a SGEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let entry = self.pos;
         // SAFETY: `sg` is an immutable reference and is equivalent to `scatterlist` via its type
         // invariants, so its safe to use with sg_next.
         let next = unsafe { bindings::sg_next(self.pos?.as_raw()) };
 
         // SAFETY: `sg_next` returns either a valid pointer to a `scatterlist`, or null if we
         // are at the end of the scatterlist.
-        self.pos = (!next.is_null()).then(|| unsafe { SGEntry::as_ref(next) });
-        entry
-    }
-}
-
-impl<'a, T, M> IntoIterator for &'a SGTable<T, M>
-where
-    T: Borrow<bindings::sg_table>,
-    M: MappedState,
-{
-    type Item = &'a SGEntry;
-    type IntoIter = SGTableIter<'a>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
+        core::mem::replace(
+            &mut self.pos,
+            (!next.is_null())
+                .then(|| unsafe { SGEntry::as_ref(next) })
+                // As per `sg_dma_address` documentation, stop iterating on the first `sg_dma_len`
+                // which is `0`.
+                .filter(|&e| e.dma_len() != 0),
+        )
     }
 }
 
@@ -306,7 +316,7 @@ where
 pub struct OwnedSgt<P: SGTablePages> {
     sgt: bindings::sg_table,
     /// Used to keep the memory pointed to by `sgt` alive.
-    _pages: P,
+    pages: P,
 }
 
 /// SAFETY: An `OwnedSgt` object is constructed internally by `SGTable` and no interface is exposed to
@@ -350,56 +360,44 @@ impl<P: SGTablePages> SGTable<OwnedSgt<P>, Unmapped> {
     /// To build a scatter-gather table, provide the `pages` object which must implement the
     /// `SGTablePages` trait.
     ///
-    ///# Examples
-    ///
-    /// ```
-    /// use kernel::{device::Device, scatterlist::*, page::*, prelude::*};
-    ///
-    /// struct PagesArray(KVec<Page>);
-    /// impl SGTablePages for PagesArray {
-    ///     fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a Page, usize, usize)> {
-    ///         self.0.iter().map(|page| (page, kernel::page::PAGE_SIZE, 0))
-    ///     }
-    ///
-    ///     fn entries(&self) -> usize {
-    ///         self.0.len()
-    ///     }
-    /// }
-    ///
-    /// let mut pages = KVec::new();
-    /// let _ = pages.push(Page::alloc_page(GFP_KERNEL)?, GFP_KERNEL);
-    /// let _ = pages.push(Page::alloc_page(GFP_KERNEL)?, GFP_KERNEL);
-    /// let sgt = SGTable::new_owned(PagesArray(pages), GFP_KERNEL)?;
-    /// # Ok::<(), Error>(())
-    /// ```
+    // wait, it is actually *owned*? What if we pass just a pointer to a VVec, for instance?
     pub fn new_owned(pages: P, flags: kernel::alloc::Flags) -> Result<Self> {
-        // SAFETY: `sgt` is not a reference.
-        let mut sgt: bindings::sg_table = unsafe { core::mem::zeroed() };
+        // List of all the memory pages of `data`.
+        let mut page_vec: KVec<*mut bindings::page> =
+            KVec::with_capacity(pages.num_pages(), flags)?;
+        for page in pages.iter() {
+            page_vec.push(page, flags)?;
+        }
 
-        // SAFETY: The sgt pointer is from the Opaque-wrapped `sg_table` object hence is valid.
-        let ret =
-            unsafe { bindings::sg_alloc_table(&mut sgt, pages.entries() as u32, flags.as_raw()) };
-        if ret != 0 {
-            return Err(Error::from_errno(ret));
-        }
-        // SAFETY: We just successfully allocated `sgt`, hence the pointer is valid and have sole access to
-        // it at this point.
-        let sgentries = unsafe { core::slice::from_raw_parts_mut(sgt.sgl, pages.entries()) };
-        for (entry, page) in sgentries
-            .iter_mut()
-            .map(|e|
-                 // SAFETY: `SGEntry::as_mut` is called on the pointer only once, which is valid and non-NULL
-                 // while inside the closure.
-                 unsafe { SGEntry::as_mut(e) })
-            .zip(pages.iter())
-        {
-            entry.set_page(page.0, page.1 as u32, page.2 as u32)
-        }
+        // Create a SG table for `data` and map it for `dev`.
+        let mut sgt: bindings::sg_table = Default::default();
+        error::to_result(unsafe {
+            bindings::sg_alloc_table_from_pages_segment(
+                &mut sgt,
+                page_vec.as_mut_ptr(),
+                page_vec.len() as u32,
+                pages.offset() as u32,
+                pages.size(),
+                u32::MAX,
+                bindings::GFP_KERNEL,
+            )
+        })?;
 
         Ok(Self {
             // INVARIANT: We just successfully allocated and built the table from the page entries.
-            table: OwnedSgt { sgt, _pages: pages },
+            table: OwnedSgt { sgt, pages },
             _mapping: Unmapped,
         })
+    }
+}
+
+impl<P, M> SGTable<OwnedSgt<P>, M>
+where
+    P: SGTablePages,
+    M: MappingState,
+{
+    /// Returns a reference to the object backing the memory for this SG table.
+    pub fn borrow(&self) -> &P {
+        &self.table.pages
     }
 }

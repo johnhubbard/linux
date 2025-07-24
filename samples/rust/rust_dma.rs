@@ -17,12 +17,16 @@ struct DmaSampleDriver {
 
 struct PagesArray(KVec<Page>);
 impl SGTablePages for PagesArray {
-    fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a Page, usize, usize)> {
-        self.0.iter().map(|page| (page, kernel::page::PAGE_SIZE, 0))
+    fn iter<'a>(&'a self) -> impl Iterator<Item = *mut bindings::page> {
+        self.0.iter().map(|page| page.as_ptr())
     }
 
-    fn entries(&self) -> usize {
-        self.0.len()
+    fn offset(&self) -> usize {
+        0
+    }
+
+    fn size(&self) -> usize {
+        self.0.len() * PAGE_SIZE
     }
 }
 
