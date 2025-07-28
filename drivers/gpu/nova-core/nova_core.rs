@@ -12,6 +12,7 @@ mod gfw;
 mod gpu;
 mod gsp;
 mod irq;
+mod mm;
 mod nvfw;
 mod regs;
 mod rm;
