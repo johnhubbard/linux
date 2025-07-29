@@ -92,7 +92,7 @@ pub(crate) fn dump_table<'a>(
         }; fw::NV2080_INTR_CATEGORY_ENUM_COUNT as usize],
     };
 
-    let table: IrqTable = cmdq.send_rm_control(dev, bar, gsp_info, &params)?;
+    let table: IrqTable = cmdq.send_rm_control(bar, gsp_info, &params)?;
 
     dev_info!(dev, "Interrupt table: {} entries\n", table.table_len);
     for (i, entry) in table.entries.iter().enumerate() {

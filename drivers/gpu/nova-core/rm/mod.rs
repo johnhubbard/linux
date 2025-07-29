@@ -13,10 +13,9 @@ use crate::driver::Bar0;
 use crate::gsp::{GspCmdq, GspCommand, GspCommandElement, GspMessageElement};
 use crate::sbuffer::SBuffer;
 use crate::util::wait_on_result;
-use kernel::device;
 use kernel::prelude::*;
 use kernel::time::Delta;
-use kernel::{dev_err, dev_info};
+use kernel::{dev_dbg, dev_err};
 
 /// Trait for RM headers common to all RM API operations
 pub(crate) trait RmHeader: GspMessageElement {
@@ -86,21 +85,18 @@ impl GspCmdq {
     /// Send an RM command and get its response.
     pub(crate) fn send_rm_command<'a, CMD: RmCommand<'a>, T: RmResponseElement>(
         &mut self,
-        // TODO: we should store an ARef of this in GspCmdq and remove this parameter. This is
-        // possible as the device does not need to be bound to use `dev_*`.
-        dev: &device::Device<device::Bound>,
         bar: &Bar0,
         cmd: &CMD,
     ) -> Result<T> {
-        self.send(dev, bar, cmd)?;
+        self.send(bar, cmd)?;
 
-        dev_info!(dev, "RM API: Sent function {:#x}\n", CMD::FUNCTION,);
+        dev_dbg!(&self.dev, "RM API: Sent function {:#x}\n", CMD::FUNCTION,);
 
         // Wait for response
         // TODO: Should this be implemented as a receive(), similar to GSP RPC?
         // TODO: Should this be skipped in case usecase doesn't need a response?
         let response = wait_on_result(Delta::from_secs(5), || {
-            match self.receive::<RmGspResponse<CMD::Header>>(dev, CMD::FUNCTION) {
+            match self.receive::<RmGspResponse<CMD::Header>>(CMD::FUNCTION) {
                 Ok(response) => Some(Ok(response)),
                 Err(EAGAIN) => None,
                 Err(e) => Some(Err(e)),
@@ -110,7 +106,7 @@ impl GspCmdq {
         // Check for RM errors
         if response.header.get_status() != 0 {
             dev_err!(
-                dev,
+                &self.dev,
                 "RM API: Function {:#x} failed with status {:#x}\n",
                 CMD::FUNCTION,
                 response.header.get_status()

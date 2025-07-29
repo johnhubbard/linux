@@ -8,7 +8,7 @@ use crate::driver::Bar0;
 use crate::gsp::{GspCmdq, GspCommand, GspStaticConfigInfo};
 use crate::nvfw::r570_144 as fw;
 use kernel::transmute::{AsBytes, FromBytesSized};
-use kernel::{device, prelude::*};
+use kernel::prelude::*;
 
 /// Wrapper for RM Control commands
 pub(crate) type RmControlCmd<'a> = RmMessage<'a, RmControlHeader>;
@@ -70,14 +70,11 @@ impl GspCmdq {
     /// Send an RM command and get its response.
     pub(crate) fn send_rm_control<C: RmControl>(
         &mut self,
-        // TODO: we should store an ARef of this in GspCmdq and remove this parameter. This is
-        // possible as the device does not need to be bound to use `dev_*`.
-        dev: &device::Device<device::Bound>,
         bar: &Bar0,
         gsp_info: &GspStaticConfigInfo,
         params: &C,
     ) -> Result<C::Response> {
-        self.send_rm_command(dev, bar, &RmControlCmd::new(gsp_info, params))
+        self.send_rm_command(bar, &RmControlCmd::new(gsp_info, params))
     }
 }
 

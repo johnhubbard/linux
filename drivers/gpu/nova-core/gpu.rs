@@ -481,7 +481,10 @@ impl Gpu {
             dev_dbg!(
                 pdev.as_ref(),
                 "  Region {}: addr={:#x} size={:#x} ({} MB)\n",
-                i, region.addr, region.size, region.size / (1024 * 1024)
+                i,
+                region.addr,
+                region.size,
+                region.size / (1024 * 1024)
             );
         }
         dev_dbg!(
