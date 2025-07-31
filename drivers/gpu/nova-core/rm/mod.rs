@@ -3,7 +3,11 @@
 // RM (Resource Management) API module for nova-core
 // Provides unified interface for RM control and RM alloc operations.
 
+pub(crate) mod alloc;
 pub(crate) mod control;
+
+// Re-export alloc types
+/* unused for now: pub(crate) use alloc::{RmAlloc, RmAllocHeader}; */
 
 use crate::driver::Bar0;
 use crate::gsp::{GspCmdq, GspCommand, GspCommandElement, GspMessageElement};
