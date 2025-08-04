@@ -16,6 +16,7 @@ use crate::gpu::Chipset;
 use crate::regs;
 use crate::util;
 
+pub(crate) mod fsp;
 pub(crate) mod gsp;
 mod hal;
 pub(crate) mod sec2;

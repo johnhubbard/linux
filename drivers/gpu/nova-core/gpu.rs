@@ -114,6 +114,13 @@ impl Chipset {
             | Self::GB207 => Architecture::Blackwell,
         }
     }
+
+    pub(crate) fn needs_large_reserved_mem(&self) -> bool {
+        match self {
+            Self::GB202 | Self::GB203 | Self::GB205 | Self::GB206 | Self::GB207 => true,
+            _ => false,
+        }
+    }
 }
 
 // TODO
@@ -131,7 +138,7 @@ impl fmt::Display for Chipset {
 }
 
 /// Enum representation of the GPU generation.
-#[derive(fmt::Debug)]
+#[derive(fmt::Debug, Copy, Clone)]
 pub(crate) enum Architecture {
     Turing = 0x16,
     Ampere = 0x17,

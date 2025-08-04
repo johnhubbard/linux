@@ -238,6 +238,7 @@ register!(NV_PFALCON_FALCON_RM @ +0x00000084 {
 register!(NV_PFALCON_FALCON_HWCFG2 @ +0x000000f4 {
     10:10   riscv as bool;
     12:12   mem_scrubbing as bool, "Set to 0 after memory scrubbing is completed";
+    13:13   riscv_br_priv_lockdown as bool, "RISC-V bridge privilege lockdown status";
     31:31   reset_ready as bool, "Signal indicating that reset is completed (GA102+)";
 });
 
@@ -351,6 +352,36 @@ register!(NV_PRISCV_RISCV_BCR_CTRL @ +0x00001668 {
     8:8     br_fetch as bool;
 });
 
+// Falcon PIO (Programmed I/O) registers for external memory access
+register!(NV_PFALCON_FALCON_ICD_CMD @ +0x00000200 {
+    0:0     opc as bool;        // Operation code: 0=read, 1=write
+    1:1     idx as bool;        // Index register select
+    2:2     adr as bool;        // Address register select
+    3:3     wdat as bool;       // Write data
+});
+
+register!(NV_PFALCON_FALCON_ICD_ADDR @ +0x00000204 {
+    31:0    addr as u32;        // Address for PIO operations
+});
+
+register!(NV_PFALCON_FALCON_ICD_WDATA @ +0x00000208 {
+    31:0    data as u32;        // Write data for PIO operations
+});
+
+register!(NV_PFALCON_FALCON_ICD_RDATA @ +0x0000020c {
+    31:0    data as u32;        // Read data from PIO operations
+});
+
+// GP102 EMEM PIO registers (used by FSP for Blackwell+)
+// These registers provide falcon external memory communication interface
+register!(NV_PFALCON_FALCON_EMEM_CTL @ +0x00000ac0 {
+    31:0    value as u32;       // EMEM control register
+});
+
+register!(NV_PFALCON_FALCON_EMEM_DATA @ +0x00000ac4 {
+    31:0    data as u32;        // EMEM data register
+});
+
 // The modules below provide registers that are not identical on all supported chips. They should
 // only be used in HAL modules.
 
@@ -369,3 +400,65 @@ pub(crate) mod ga100 {
         0:0     display_disabled as bool;
     });
 }
+
+// PTHERM
+
+// FSP secure boot completion status register used by FSP to signal boot completion
+// This is the NV_THERM_I2CS_SCRATCH register
+// Different architectures use different addresses:
+// - Hopper: 0x000200bc
+// - Blackwell: 0x00ad00bc
+pub(crate) fn fsp_thermal_scratch_reg_addr(arch: Architecture) -> Result<usize> {
+    match arch {
+        Architecture::Hopper => Ok(0x000200bc),
+        Architecture::Blackwell => Ok(0x00ad00bc),
+        _ => Err(ENOTSUPP),
+    }
+}
+
+// Helper function to read FSP boot completion status from the correct register
+pub(crate) fn read_fsp_boot_complete_status(
+    bar: &crate::driver::Bar0,
+    arch: Architecture,
+) -> Result<u32> {
+    let addr = fsp_thermal_scratch_reg_addr(arch)?;
+    Ok(bar.read32(addr))
+}
+
+// FSP (Firmware System Processor) registers for Blackwell+ Chain of Trust
+register!(NV_PFSP_FALCON_MAILBOX0 @ 0x00824040 {
+    31:0    value as u32;
+});
+
+register!(NV_PFSP_FALCON_MAILBOX1 @ 0x00824044 {
+    31:0    value as u32;
+});
+
+register!(NV_PFSP_FALCON_OS @ 0x00824080 {
+    31:0    value as u32;
+});
+
+// FSP queue registers used for falcon EMEM communication
+register!(NV_PFSP_QUEUE_HEAD @ 0x008f2c00 {
+    31:0    address as u32;
+});
+
+register!(NV_PFSP_QUEUE_TAIL @ 0x008f2c04 {
+    31:0    address as u32;
+});
+
+register!(NV_PFSP_MSGQ_HEAD @ 0x008f2c80 {
+    31:0    address as u32;
+});
+
+register!(NV_PFSP_MSGQ_TAIL @ 0x008f2c84 {
+    31:0    address as u32;
+});
+
+register!(NV_PFSP_MSGQ_DMEM_ADDR @ 0x008f2c88 {
+    31:0    address as u32;
+});
+
+register!(NV_PFSP_MSGQ_DMEM_SIZE @ 0x008f2c8c {
+    31:0    size as u32;
+});
