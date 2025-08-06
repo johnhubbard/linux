@@ -521,9 +521,9 @@ impl GspCmdq {
             return Err(EAGAIN);
         }
 
-        let result = if rpc.length + HEADER_SIZE < remaining {
+        let result = if rpc_length + HEADER_SIZE < remaining {
             let mut sbuf = SBuffer::new_reader([
-                &msg_slice[(HEADER_SIZE as usize)..(HEADER_SIZE + rpc.length) as usize]
+                &msg_slice[(HEADER_SIZE as usize)..(HEADER_SIZE + rpc_length) as usize]
             ]);
             A::new_from_sbuf(&mut sbuf)
         } else {
@@ -531,7 +531,7 @@ impl GspCmdq {
             let ptr =
                 unsafe { core::ptr::addr_of!((*self.gsp_mem.start_ptr_mut()).gspq.msgq.data[0]) };
             let slice_2 = unsafe {
-                core::slice::from_raw_parts(ptr as *const u8, rpc.length as usize - slice_1.len())
+                core::slice::from_raw_parts(ptr as *const u8, rpc_length as usize - slice_1.len())
             };
 
             let mut sbuf = SBuffer::new_reader([slice_1, slice_2]);
