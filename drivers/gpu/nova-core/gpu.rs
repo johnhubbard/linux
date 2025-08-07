@@ -100,8 +100,8 @@ impl Chipset {
     }
 
     pub(crate) fn needs_large_reserved_mem(&self) -> bool {
-        match self {
-            Self::GB202 | Self::GB203 | Self::GB205 | Self::GB206 | Self::GB207 => true,
+        match self.arch() {
+            Architecture::Hopper | Architecture::Blackwell => true,
             _ => false,
         }
     }
