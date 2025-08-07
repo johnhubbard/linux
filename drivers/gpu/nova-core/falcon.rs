@@ -641,8 +641,7 @@ impl<E: FalconEngine + 'static> Falcon<E> {
     ///
     /// Returns `true` if the RISC-V core is active, `false` otherwise.
     pub(crate) fn is_riscv_active(&self, bar: &Bar0) -> Result<bool> {
-        let cpuctl = regs::NV_PRISCV_RISCV_CPUCTL::read(bar, &E::ID);
-        Ok(cpuctl.active_stat())
+        self.hal.is_riscv_active(bar)
     }
 
     /// Write the application version to the OS register.
