@@ -93,26 +93,10 @@ define_chipset!({
 });
 
 impl Chipset {
+    /// Extract architecture from chipset value using bit patterns.
     pub(crate) fn arch(&self) -> Architecture {
-        match self {
-            Self::TU102 | Self::TU104 | Self::TU106 | Self::TU117 | Self::TU116 => {
-                Architecture::Turing
-            }
-            Self::GA100 | Self::GA102 | Self::GA103 | Self::GA104 | Self::GA106 | Self::GA107 => {
-                Architecture::Ampere
-            }
-            Self::GH100 => Architecture::Hopper,
-            Self::AD102 | Self::AD103 | Self::AD104 | Self::AD106 | Self::AD107 => {
-                Architecture::Ada
-            }
-            Self::GB100
-            | Self::GB102
-            | Self::GB202
-            | Self::GB203
-            | Self::GB205
-            | Self::GB206
-            | Self::GB207 => Architecture::Blackwell,
-        }
+        let arch_pattern = (*self as u32 >> 4) as u8;
+        Architecture::try_from(arch_pattern).unwrap_or_else(|_| Architecture::Unknown)
     }
 
     pub(crate) fn needs_large_reserved_mem(&self) -> bool {
@@ -145,6 +129,7 @@ pub(crate) enum Architecture {
     Hopper = 0x18,
     Ada = 0x19,
     Blackwell = 0x1b,
+    Unknown = 0xff,
 }
 
 impl TryFrom<u8> for Architecture {

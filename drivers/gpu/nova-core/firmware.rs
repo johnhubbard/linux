@@ -172,6 +172,7 @@ fn get_signature_section(chipset: Chipset) -> Result<&'static str> {
                 _ => Err(ENOTSUPP),
             }
         }
+        gpu::Architecture::Unknown => Err(ENOTSUPP),
     }
 }
 
