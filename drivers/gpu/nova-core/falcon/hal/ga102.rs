@@ -116,4 +116,9 @@ impl<E: FalconEngine> FalconHal<E> for Ga102<E> {
     fn program_brom(&self, _falcon: &Falcon<E>, bar: &Bar0, params: &FalconBromParams) -> Result {
         program_brom_ga102::<E>(bar, params)
     }
+
+    fn is_riscv_active(&self, bar: &Bar0) -> Result<bool> {
+        let cpuctl = regs::NV_PRISCV_RISCV_CPUCTL::read(bar, E::BASE);
+        Ok(cpuctl.active_stat())
+    }
 }
