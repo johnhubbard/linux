@@ -14,7 +14,7 @@ use crate::firmware::BinFirmware;
 /// Descriptor for microcode running on a RISC-V core.
 #[repr(C)]
 #[derive(Debug)]
-struct RmRiscvUCodeDesc {
+pub(crate) struct RmRiscvUCodeDesc {
     version: u32,
     bootloader_offset: u32,
     bootloader_size: u32,

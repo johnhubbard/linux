@@ -29,7 +29,6 @@ pub(crate) mod riscv;
 
 pub(crate) const FIRMWARE_VERSION: &str = "570.144";
 
-#[expect(unused)]
 pub(crate) fn elf_section<'a, 'b>(elf: &'a [u8], section_name: &'b str) -> Option<&'a [u8]> {
     // Check ELF magic
     if elf.len() < 5 || &elf[0..4] != b"\x7fELF" {
@@ -289,7 +288,6 @@ pub(crate) enum ArchFirmwareData {
         booter_unloader: BooterFirmware,
     },
     /// Firmware data for FSP-based architectures
-    #[expect(dead_code)]
     Fsp {
         /// FMC firmware image data (only the .image section)
         fmc_image: DmaObject,
@@ -383,13 +381,64 @@ impl Firmware {
         chipset: Chipset,
         ver: &str,
     ) -> Result<Firmware> {
-        // Currently all supported architectures use SEC2
-        let sec2 = resources.sec2.ok_or_else(|| {
-            dev_err!(dev, "SEC2 falcon required for chipset {}\n", chipset);
+        match chipset.arch() {
+            gpu::Architecture::Turing | gpu::Architecture::Ampere | gpu::Architecture::Ada => {
+                // SEC2-based architectures
+                let sec2 = resources.sec2.ok_or_else(|| {
+                    dev_err!(dev, "SEC2 falcon required for chipset {}\n", chipset);
+                    EINVAL
+                })?;
+                Self::load_with_sec2(dev, resources.bar, sec2, chipset, ver)
+            }
+            gpu::Architecture::Hopper | gpu::Architecture::Blackwell => {
+                // FSP-based architectures
+                Self::load_with_fsp(dev, chipset, ver)
+            }
+        }
+    }
+
+    /// Load firmware using FSP (Hopper/Blackwell)
+    fn load_with_fsp(
+        dev: &device::Device<device::Bound>,
+        chipset: Chipset,
+        ver: &str,
+    ) -> Result<Firmware> {
+        let request = |name| {
+            Self::firmware_path(chipset, ver, name)
+                .and_then(|path| firmware::Firmware::request(&path, dev))
+        };
+
+        // Load FMC firmware for FSP chain of trust
+        let fmc_fw = request("fmc")?;
+
+        // FSP expects only the .image section, not the entire ELF file
+        let fmc_image_data = elf_section(fmc_fw.data(), "image").ok_or_else(|| {
+            dev_err!(dev, "FMC ELF file missing 'image' section\n");
             EINVAL
         })?;
 
-        Self::load_with_sec2(dev, resources.bar, sec2, chipset, ver)
+        // Load GSP firmware (same as SEC2 path)
+        let gsp_fw = request("gsp")?;
+
+        // Extract the .fwimage section for the GSP firmware
+        let data = elf_section(gsp_fw.data(), ".fwimage").ok_or(EINVAL)?;
+        let gsp = GspFirmware::new(dev, data)?;
+
+        let gsp_sigs_section = get_gsp_sigs_section(chipset)?;
+
+        let gsp_sigs = elf_section(gsp_fw.data(), gsp_sigs_section)
+            .ok_or(EINVAL)
+            .and_then(|data| DmaObject::from_data(dev, data))?;
+
+        Ok(Firmware {
+            bootloader: request("bootloader").and_then(|fw| RiscvFirmware::new(dev, &fw))?,
+            gsp,
+            gsp_sigs,
+            arch_data: ArchFirmwareData::Fsp {
+                fmc_image: DmaObject::from_data(dev, fmc_image_data)?,
+                fmc_full: DmaObject::from_data(dev, fmc_fw.data())?,
+            },
+        })
     }
 
     /// Load firmware using SEC2 falcon (Turing/Ampere/Ada)
