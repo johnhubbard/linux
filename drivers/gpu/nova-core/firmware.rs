@@ -383,11 +383,23 @@ impl Firmware {
         chipset: Chipset,
         ver: &str,
     ) -> Result<Firmware> {
+        // Currently all supported architectures use SEC2
         let sec2 = resources.sec2.ok_or_else(|| {
             dev_err!(dev, "SEC2 falcon required for chipset {}\n", chipset);
             EINVAL
         })?;
-        let bar = resources.bar;
+
+        Self::load_with_sec2(dev, resources.bar, sec2, chipset, ver)
+    }
+
+    /// Load firmware using SEC2 falcon (Turing/Ampere/Ada)
+    fn load_with_sec2(
+        dev: &device::Device<device::Bound>,
+        bar: &Bar0,
+        sec2: &Falcon<Sec2>,
+        chipset: Chipset,
+        ver: &str,
+    ) -> Result<Firmware> {
         let request = |name| {
             Self::firmware_path(chipset, ver, name)
                 .and_then(|path| firmware::Firmware::request(&path, dev))
