@@ -10,9 +10,10 @@
 //! Unlike Turing/Ampere/Ada, there is NO SEC2 (Security Engine 2) usage.
 //! FSP handles secure boot directly using FMC firmware + Chain of Trust.
 
-use kernel::ptr::Alignable;
+use kernel::device;
+use kernel::prelude::*;
+use kernel::ptr::{Alignable, Alignment};
 use kernel::transmute::{AsBytes, FromBytes};
-use kernel::{device, prelude::*};
 
 /// FSP Chain of Trust (COT) version for Blackwell.
 /// GB202 uses version 2 (not 1 like GH100)

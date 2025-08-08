@@ -116,12 +116,9 @@ impl Chipset {
         }
     }
 
-    #[expect(dead_code)]
+    /// Determine if this chipset needs larger reserved memory allocation.
     pub(crate) fn needs_large_reserved_mem(&self) -> bool {
-        match self.arch() {
-            Architecture::Hopper | Architecture::Blackwell => true,
-            _ => false,
-        }
+        matches!(self.arch(), Architecture::Hopper | Architecture::Blackwell)
     }
 }
 
