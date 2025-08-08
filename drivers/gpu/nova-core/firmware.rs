@@ -263,6 +263,18 @@ fn get_gsp_sigs_section(chipset: Chipset) -> Result<&'static str> {
     }
 }
 
+/// Resources needed for firmware loading.
+///
+/// This structure contains all the hardware resources that might be needed
+/// for loading firmware across different GPU architectures.
+pub(crate) struct FirmwareResources<'a> {
+    /// BAR0 register access
+    pub bar: &'a Bar0,
+    /// SEC2 falcon (required for Turing/Ampere/Ada)
+    pub sec2: Option<&'a Falcon<Sec2>>,
+    // Future: Add FSP falcon when needed
+}
+
 /// Architecture-specific firmware data.
 ///
 /// Different GPU architectures require different firmware components:
@@ -367,11 +379,15 @@ impl Firmware {
 
     pub(crate) fn new(
         dev: &device::Device<device::Bound>,
-        sec2: &Falcon<Sec2>,
-        bar: &Bar0,
+        resources: FirmwareResources<'_>,
         chipset: Chipset,
         ver: &str,
     ) -> Result<Firmware> {
+        let sec2 = resources.sec2.ok_or_else(|| {
+            dev_err!(dev, "SEC2 falcon required for chipset {}\n", chipset);
+            EINVAL
+        })?;
+        let bar = resources.bar;
         let request = |name| {
             Self::firmware_path(chipset, ver, name)
                 .and_then(|path| firmware::Firmware::request(&path, dev))
