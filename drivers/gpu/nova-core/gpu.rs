@@ -356,6 +356,19 @@ impl Gpu {
         Self::run_gsp_sequencer(pdev, bar, fw, libos, gsp_falcon, sec2_falcon)
     }
 
+    /// Run FWSEC-FRTS for architectures that require it
+    fn maybe_run_fwsec_frts(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        _chipset: Chipset,
+        gsp_falcon: &Falcon<Gsp>,
+        bios: &Vbios,
+        fb_layout: &FbLayout,
+    ) -> Result<()> {
+        // For now, always run FWSEC-FRTS (only SEC2 architectures supported)
+        Self::run_fwsec_frts(pdev.as_ref(), gsp_falcon, bar, bios, fb_layout)
+    }
+
     /// Initialize debugfs for Nova GPU driver.
     ///
     /// Creates the debugfs directory and log files for GSP debugging.
@@ -509,7 +522,7 @@ impl Gpu {
 
         let bios = Vbios::new(pdev, bar)?;
 
-        Self::run_fwsec_frts(pdev.as_ref(), &gsp_falcon, bar, &bios, &fb_layout)?;
+        Self::maybe_run_fwsec_frts(pdev, bar, spec.chipset, &gsp_falcon, &bios, &fb_layout)?;
 
         let mut libos = gsp::GspMemObjects::new(pdev, bar, &fw, &fb_layout)?;
 
