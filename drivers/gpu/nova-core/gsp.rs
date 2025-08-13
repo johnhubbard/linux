@@ -36,6 +36,22 @@ unsafe impl AsBytes for fw::GspFwWprMeta {}
 //         that is not a problem because they are not used outside the kernel.
 unsafe impl FromBytes for fw::GspFwWprMeta {}
 
+// SAFETY: These structs don't meet the no-padding requirements of AsBytes but
+//         that is not a problem because they are not used outside the kernel.
+unsafe impl AsBytes for fw::GSP_ARGUMENTS_CACHED {}
+
+// SAFETY: These structs don't meet the no-padding requirements of FromBytes but
+//         that is not a problem because they are not used outside the kernel.
+unsafe impl FromBytes for fw::GSP_ARGUMENTS_CACHED {}
+
+// SAFETY: These structs don't meet the no-padding requirements of FromBytes but
+//         that is not a problem because they are not used outside the kernel.
+unsafe impl AsBytes for fw::MESSAGE_QUEUE_INIT_ARGUMENTS {}
+
+// SAFETY: These structs don't meet the no-padding requirements of FromBytes but
+//         that is not a problem because they are not used outside the kernel.
+unsafe impl AsBytes for fw::GSP_SR_INIT_ARGUMENTS {}
+
 #[allow(unused)]
 pub(crate) struct GspMemObjects {
     libos: CoherentAllocation<fw::LibosMemoryRegionInitArgument>,
@@ -44,6 +60,7 @@ pub(crate) struct GspMemObjects {
     pub logrm: CoherentAllocation<u8>,
     pub wpr_meta: CoherentAllocation<fw::GspFwWprMeta>,
     pub cmdq: GspCmdq,
+    rmargs: CoherentAllocation<fw::GSP_ARGUMENTS_CACHED>,
 }
 
 // TODO: use dedicated type for coherent allocation of GspFwWprMeta? And make it part of the
@@ -176,12 +193,34 @@ impl GspMemObjects {
 
         // Creates its own PTE array
         let cmdq = GspCmdq::new(dev)?;
+        let rmargs = create_coherent_dma_object::<fw::GSP_ARGUMENTS_CACHED>(
+            dev, "RMARGS", 1, &mut libos, 3,
+        )?;
+        let (shared_mem_phys_addr, cmd_queue_offset, stat_queue_offset) = cmdq.get_cmdq_offsets();
+
+        dma_write!(
+            rmargs[0].messageQueueInitArguments = fw::MESSAGE_QUEUE_INIT_ARGUMENTS {
+                sharedMemPhysAddr: shared_mem_phys_addr,
+                pageTableEntryCount: cmdq.nr_ptes,
+                cmdQueueOffset: cmd_queue_offset,
+                statQueueOffset: stat_queue_offset,
+            }
+        )?;
+        dma_write!(
+            rmargs[0].srInitArguments = fw::GSP_SR_INIT_ARGUMENTS {
+                oldLevel: 0,
+                flags: 0,
+                bInPMTransition: 0,
+            }
+        )?;
+        dma_write!(rmargs[0].bDmemStack = 1)?;
 
         Ok(GspMemObjects {
             libos,
             loginit,
             logintr,
             logrm,
+            rmargs,
             wpr_meta,
             cmdq,
         })
