@@ -46,6 +46,8 @@ pub(crate) struct GspMemObjects {
     pub cmdq: GspCmdq,
 }
 
+// TODO: use dedicated type for coherent allocation of GspFwWprMeta? And make it part of the
+// firmware struct to guarantee ownership?
 pub(crate) fn build_wpr_meta(
     dev: &device::Device<device::Bound>,
     fw: &Firmware,
@@ -80,6 +82,7 @@ pub(crate) fn build_wpr_meta(
             bootBinOffset: fb_layout.boot.start,
             frtsOffset: fb_layout.frts.start,
             frtsSize: fb_layout.frts.end - fb_layout.frts.start,
+            // TODO: magic number!
             gspFwWprEnd: fb_layout.vga_workspace.start & !(0x20000 - 1),
             gspFwHeapVfPartitionCount: fb_layout.vf_partition_count,
             fbSize: fb_layout.fb.end - fb_layout.fb.start,
