@@ -86,14 +86,6 @@ pub(crate) fn build_wpr_meta(
             vgaWorkspaceOffset: fb_layout.vga_workspace.start,
             vgaWorkspaceSize: fb_layout.vga_workspace.end - fb_layout.vga_workspace.start,
             bootCount: 0,
-            __bindgen_anon_2: fw::GspFwWprMeta__bindgen_ty_2 {
-                __bindgen_anon_1: fw::GspFwWprMeta__bindgen_ty_2__bindgen_ty_1 {
-                    partitionRpcAddr: 0,
-                    partitionRpcRequestOffset: 0,
-                    partitionRpcReplyOffset: 0,
-                    ..Default::default()
-                },
-            },
             verified: 0,
             ..Default::default()
         }
