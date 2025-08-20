@@ -7,9 +7,9 @@ use kernel::alloc::flags::GFP_KERNEL;
 use kernel::device;
 use kernel::dma::CoherentAllocation;
 use kernel::prelude::*;
+use kernel::sync::aref::ARef;
 use kernel::time::Delta;
 use kernel::transmute::{AsBytes, FromBytes};
-use kernel::types::ARef;
 use kernel::{dma_read, dma_write};
 
 use crate::driver::Bar0;
