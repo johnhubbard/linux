@@ -14,9 +14,9 @@
 /// ```
 /// use kernel::transmute::FromBytes;
 ///
-/// let foo = [1, 2, 3, 4];
+/// let raw = [1, 2, 3, 4];
 ///
-/// let result = u32::from_bytes(&foo).unwrap();
+/// let result = u32::from_bytes(&raw).unwrap();
 ///
 /// #[cfg(target_endian = "little")]
 /// assert_eq!(*result, 0x4030201);
