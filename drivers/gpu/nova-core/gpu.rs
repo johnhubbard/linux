@@ -328,7 +328,7 @@ impl Gpu {
         pr_info!("Trying to run Booter loader...\n");
 
         sec2_falcon.reset(&bar)?;
-        sec2_falcon.dma_load(&bar, &fw.booter_load)?;
+        sec2_falcon.dma_load(&bar, &fw.booter_loader)?;
         let (mbox0, mbox1) = sec2_falcon.boot(
             &bar,
             Some(wpr_handle as u32),
@@ -337,7 +337,7 @@ impl Gpu {
         dev_info!(pdev.as_ref(), "MBOX: {:#x},{:#x}\n", mbox0, mbox1,);
 
         // Match what Nouveau does here:
-        gsp_falcon.write_os_version(&bar, fw.gsp_desc.app_version)?;
+        gsp_falcon.write_os_version(&bar, fw.bootloader.app_version)?;
 
         // Poll for RISC-V to become active before running sequencer
         util::wait_on(Delta::from_secs(5), || {
