@@ -53,7 +53,7 @@ pub(crate) fn build_wpr_meta(
             magic: fw::GSP_FW_WPR_META_MAGIC as u64,
             revision: u64::from(fw::GSP_FW_WPR_META_REVISION),
             sysmemAddrOfRadix3Elf: fw.gsp.lvl0_dma_handle(),
-            sizeOfRadix3Elf: fw.gsp.size() as u64,
+            sizeOfRadix3Elf: fw.gsp.size as u64,
             sysmemAddrOfBootloader: fw.bootloader.ucode.dma_handle(),
             sizeOfBootloader: fw.bootloader.ucode.size() as u64,
             bootloaderCodeOffset: u64::from(fw.bootloader.code_offset),

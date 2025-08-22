@@ -124,7 +124,7 @@ pub(crate) struct Firmware {
     /// GSP firmware.
     pub gsp: GspFirmware,
     /// GSP signatures, to be passed as parameter to the bootloader for validation.
-    gsp_sigs: DmaObject,
+    pub gsp_sigs: DmaObject,
 }
 
 impl Firmware {
