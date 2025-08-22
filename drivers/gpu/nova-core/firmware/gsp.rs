@@ -25,7 +25,6 @@ pub(crate) struct GspFirmware {
     /// The level 0 page table, mapping [`Self::lvl1`] at its beginning.
     lvl0: DmaObject,
     /// Size in bytes of the firmware contained in [`Self::fw`].
-    #[expect(unused)]
     pub size: usize,
 }
 
@@ -93,7 +92,6 @@ impl GspFirmware {
         })
     }
 
-    #[expect(unused)]
     /// Returns the DMA handle of the level 0 page table.
     pub(crate) fn lvl0_dma_handle(&self) -> DmaAddress {
         self.lvl0.dma_handle()
