@@ -112,6 +112,30 @@ mod elf {
     }
 }
 
+fn get_gsp_sigs_section(chipset: Chipset) -> Result<&'static str> {
+    match chipset.arch() {
+        Architecture::Ampere => Ok(".fwsignature_ga10x"),
+        Architecture::Hopper => Ok(".fwsignature_gh10x"),
+        Architecture::Ada => Ok(".fwsignature_ad10x"),
+        Architecture::Blackwell => {
+            // Distinguish between GB10x and GB20x series
+            match chipset {
+                // GB10x series: GB100, GB102
+                Chipset::GB100 | Chipset::GB102 => Ok(".fwsignature_gb10x"),
+                // GB20x series: GB202, GB203, GB205, GB206, GB207
+                Chipset::GB202
+                | Chipset::GB203
+                | Chipset::GB205
+                | Chipset::GB206
+                | Chipset::GB207 => Ok(".fwsignature_gb20x"),
+                // Unsupported Blackwell chips
+                _ => return Err(ENOTSUPP),
+            }
+        }
+        _ => return Err(ENOTSUPP),
+    }
+}
+
 /// Structure encapsulating the firmware blobs required for the GPU to operate.
 pub(crate) struct Firmware {
     /// Runs on the sec2 falcon engine to load and start the GSP bootloader.
@@ -149,27 +173,8 @@ impl Firmware {
             .ok_or(EINVAL)
             .and_then(|data| GspFirmware::new(dev, data))?;
 
-        let gsp_sigs_section = match chipset.arch() {
-            Architecture::Ampere => ".fwsignature_ga10x",
-            Architecture::Hopper => ".fwsignature_gh10x",
-            Architecture::Ada => ".fwsignature_ad10x",
-            Architecture::Blackwell => {
-                // Distinguish between GB10x and GB20x series
-                match chipset {
-                    // GB10x series: GB100, GB102
-                    Chipset::GB100 | Chipset::GB102 => ".fwsignature_gb10x",
-                    // GB20x series: GB202, GB203, GB205, GB206, GB207
-                    Chipset::GB202
-                    | Chipset::GB203
-                    | Chipset::GB205
-                    | Chipset::GB206
-                    | Chipset::GB207 => ".fwsignature_gb20x",
-                    // Unsupported Blackwell chips
-                    _ => return Err(ENOTSUPP),
-                }
-            }
-            _ => return Err(ENOTSUPP),
-        };
+        let gsp_sigs_section = get_gsp_sigs_section(chipset)?;
+
         let gsp_sigs = elf::elf64_section(gsp_fw.data(), gsp_sigs_section)
             .ok_or(EINVAL)
             .and_then(|data| DmaObject::from_data(dev, data))?;
