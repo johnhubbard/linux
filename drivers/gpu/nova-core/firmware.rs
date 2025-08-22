@@ -125,7 +125,6 @@ pub(crate) struct Firmware {
     pub gsp: GspFirmware,
     /// GSP signatures, to be passed as parameter to the bootloader for validation.
     pub gsp_sigs: DmaObject,
-    pub gsp_desc: RmRiscvUCodeDesc,
 }
 
 impl Firmware {
@@ -146,27 +145,9 @@ impl Firmware {
         };
 
         let gsp_fw = request("gsp")?;
-
-        let (gsp, gsp_desc) = {
-            // Extract the .fwimage section for the GSP firmware
-            let data = elf::elf64_section(gsp_fw.data(), ".fwimage").ok_or(EINVAL)?;
-
-            let gsp = GspFirmware::new(dev, data)?;
-
-            // Extract RISC-V ucode descriptor
-            let hdr = data
-                .get(0..size_of::<BinHdr>())
-                .and_then(BinHdr::from_bytes_copy)
-                .ok_or(EINVAL)?;
-
-            let offset = hdr.header_offset as usize;
-            let desc = data
-                .get(offset..offset + size_of::<RmRiscvUCodeDesc>())
-                .and_then(RmRiscvUCodeDesc::from_bytes_copy)
-                .ok_or(EINVAL)?;
-
-            (gsp, desc)
-        };
+        let gsp = elf::elf64_section(gsp_fw.data(), ".fwimage")
+            .ok_or(EINVAL)
+            .and_then(|data| GspFirmware::new(dev, data))?;
 
         let gsp_sigs_section = match chipset.arch() {
             Architecture::Ampere => ".fwsignature_ga10x",
@@ -184,7 +165,6 @@ impl Firmware {
             bootloader: request("bootloader").and_then(|fw| RiscvFirmware::new(dev, &fw))?,
             gsp,
             gsp_sigs,
-            gsp_desc,
         })
     }
 }
