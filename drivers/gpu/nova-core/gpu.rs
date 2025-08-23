@@ -222,6 +222,106 @@ impl PinnedDrop for Gpu {
 }
 
 impl Gpu {
+    /// Load firmware and create architecture-specific falcons
+    fn load_firmware_for_arch(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        chipset: Chipset,
+        sec2_falcon: &Falcon<Sec2>,
+    ) -> Result<Firmware> {
+        // For now, only SEC2-based architectures are supported
+        let resources = FirmwareResources {
+            bar,
+            sec2: Some(sec2_falcon),
+        };
+        let fw = Firmware::new(pdev.as_ref(), resources, chipset, FIRMWARE_VERSION)?;
+        Ok(fw)
+    }
+
+    /// Execute architecture-specific GSP boot sequence
+    fn boot_gsp_by_arch(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        fw: &Firmware,
+        gsp_falcon: &Falcon<Gsp>,
+        sec2_falcon: &Falcon<Sec2>,
+        libos: &GspMemObjects,
+        _fb_layout: &FbLayout,
+    ) -> Result<()> {
+        let libos_handle = libos.libos_dma_handle();
+        let wpr_handle = libos.wpr_meta.dma_handle();
+
+        // GSP boot
+        gsp_falcon.reset(bar)?;
+        let (mbox0, mbox1) = gsp_falcon.boot(
+            bar,
+            Some(libos_handle as u32),
+            Some((libos_handle >> 32) as u32),
+        )?;
+        dev_dbg!(
+            pdev.as_ref(),
+            "GSP MBOX0: {:#x}, MBOX1: {:#x}\n",
+            mbox0,
+            mbox1
+        );
+
+        dev_dbg!(
+            pdev.as_ref(),
+            "Using SEC2 to load and run the booter_load firmware...\n"
+        );
+
+        // SEC2 boot
+        sec2_falcon.reset(bar)?;
+        let booter_loader = fw.booter_loader().ok_or_else(|| {
+            dev_err!(
+                pdev.as_ref(),
+                "No booter_loader firmware for SEC2 architecture\n"
+            );
+            EINVAL
+        })?;
+        sec2_falcon.dma_load(bar, booter_loader)?;
+        let (mbox0, mbox1) = sec2_falcon.boot(
+            bar,
+            Some(wpr_handle as u32),
+            Some((wpr_handle >> 32) as u32),
+        )?;
+        dev_dbg!(
+            pdev.as_ref(),
+            "SEC2 MBOX0: {:#x}, MBOX1{:#x}\n",
+            mbox0,
+            mbox1
+        );
+
+        Ok(())
+    }
+
+    /// Run GSP sequencer for SEC2-based architectures only
+    fn maybe_run_sequencer(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        fw: &Firmware,
+        libos: &mut GspMemObjects,
+        gsp_falcon: &Falcon<Gsp>,
+        sec2_falcon: &Falcon<Sec2>,
+    ) -> Result<()> {
+        // For now, always run sequencer (only SEC2 architectures supported)
+        let libos_dma_handle = libos.libos_dma_handle();
+
+        // Create and run the GSP sequencer
+        gsp::sequencer::GspSequencer::run(
+            &mut libos.cmdq,
+            &fw,
+            libos_dma_handle,
+            &gsp_falcon,
+            &sec2_falcon,
+            pdev.as_ref(),
+            &bar,
+            Delta::from_secs(10),
+        )?;
+
+        Ok(())
+    }
+
     /// Initialize debugfs for Nova GPU driver.
     ///
     /// Creates the debugfs directory and log files for GSP debugging.
@@ -368,12 +468,7 @@ impl Gpu {
 
         let sec2_falcon = Falcon::<Sec2>::new(pdev.as_ref(), spec.chipset)?;
 
-        let resources = FirmwareResources {
-            bar,
-            sec2: Some(&sec2_falcon),
-        };
-
-        let fw = Firmware::new(pdev.as_ref(), resources, spec.chipset, FIRMWARE_VERSION)?;
+        let fw = Self::load_firmware_for_arch(pdev, bar, spec.chipset, &sec2_falcon)?;
 
         let fb_layout = FbLayout::new(spec.chipset, bar, &fw)?;
         dev_dbg!(pdev.as_ref(), "{:#?}\n", fb_layout);
@@ -383,40 +478,16 @@ impl Gpu {
         Self::run_fwsec_frts(pdev.as_ref(), &gsp_falcon, bar, &bios, &fb_layout)?;
 
         let mut libos = gsp::GspMemObjects::new(pdev, bar, &fw, &fb_layout)?;
-        let libos_handle = libos.libos_dma_handle();
-        let wpr_handle = libos.wpr_meta.dma_handle();
 
-        gsp_falcon.reset(bar)?;
-        let (mbox0, mbox1) = gsp_falcon.boot(
+        Self::boot_gsp_by_arch(
+            pdev,
             bar,
-            Some(libos_handle as u32),
-            Some((libos_handle >> 32) as u32),
+            &fw,
+            &gsp_falcon,
+            &sec2_falcon,
+            &libos,
+            &fb_layout,
         )?;
-        dev_dbg!(
-            pdev.as_ref(),
-            "GSP MBOX0: {:#x}, MBOX1: {:#x}\n",
-            mbox0,
-            mbox1
-        );
-
-        dev_dbg!(
-            pdev.as_ref(),
-            "Using SEC2 to load and run the booter_load firmware...\n"
-        );
-
-        sec2_falcon.reset(&bar)?;
-        sec2_falcon.dma_load(&bar, fw.booter_loader().ok_or(EIO)?)?;
-        let (mbox0, mbox1) = sec2_falcon.boot(
-            &bar,
-            Some(wpr_handle as u32),
-            Some((wpr_handle >> 32) as u32),
-        )?;
-        dev_dbg!(
-            pdev.as_ref(),
-            "SEC2 MBOX0: {:#x}, MBOX1{:#x}\n",
-            mbox0,
-            mbox1
-        );
 
         // Match what Nouveau does here:
         gsp_falcon.write_os_version(&bar, fw.bootloader.app_version)?;
@@ -437,19 +508,8 @@ impl Gpu {
         );
 
         Self::init_debugfs(&libos);
-        let libos_dma_handle = libos.libos_dma_handle();
 
-        // Create and run the GSP sequencer
-        gsp::sequencer::GspSequencer::run(
-            &mut libos.cmdq,
-            &fw,
-            libos_dma_handle,
-            &gsp_falcon,
-            &sec2_falcon,
-            pdev.as_ref(),
-            &bar,
-            Delta::from_secs(10),
-        )?;
+        Self::maybe_run_sequencer(pdev, bar, &fw, &mut libos, &gsp_falcon, &sec2_falcon)?;
 
         gsp_init_done(&mut libos.cmdq, Delta::from_secs(10))?;
         let info = get_gsp_info(&mut libos.cmdq, bar)?;
