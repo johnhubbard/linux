@@ -124,6 +124,7 @@ pub(crate) struct FbLayout {
     pub(crate) heap: Range<u64>,
     pub(crate) region: [Range<u64>; 16],
     pub(crate) nr_region: usize,
+    /// Total reserved size (heap + PMU reserved), aligned to 2MB
     pub(crate) rsvd_size: u32,
 }
 

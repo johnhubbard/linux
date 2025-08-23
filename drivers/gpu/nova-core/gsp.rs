@@ -112,6 +112,7 @@ pub(crate) fn build_wpr_meta(
             vgaWorkspaceSize: fb_layout.vga_workspace.end - fb_layout.vga_workspace.start,
             bootCount: 0,
             verified: 0,
+            pmuReservedSize: crate::fb::calc_pmu_reserved_size() as u32,
             ..Default::default()
         }
     )?;
