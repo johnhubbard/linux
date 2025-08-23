@@ -12,8 +12,8 @@ use crate::firmware::fwsec::{FwsecCommand, FwsecFirmware};
 use crate::firmware::{Firmware, FIRMWARE_VERSION};
 use crate::gfw;
 use crate::gsp;
-use crate::gsp::GspMemObjects;
 use crate::gsp::commands::{get_gsp_info, gsp_init_done};
+use crate::gsp::GspMemObjects;
 use crate::regs;
 use crate::util;
 use crate::vbios::Vbios;
@@ -409,7 +409,7 @@ impl Gpu {
         );
 
         sec2_falcon.reset(&bar)?;
-        sec2_falcon.dma_load(&bar, &fw.booter_loader)?;
+        sec2_falcon.dma_load(&bar, fw.booter_loader().ok_or(EIO)?)?;
         let (mbox0, mbox1) = sec2_falcon.boot(
             &bar,
             Some(wpr_handle as u32),
