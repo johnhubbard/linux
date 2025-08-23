@@ -5,11 +5,12 @@ use kernel::{
 };
 
 use crate::driver::Bar0;
-use crate::falcon::{gsp::Gsp, sec2::Sec2, Falcon};
+use crate::falcon::{fsp::Fsp as FspEngine, gsp::Gsp, sec2::Sec2, Falcon, FalconEngine};
 use crate::fb::FbLayout;
 use crate::fb::SysmemFlush;
 use crate::firmware::fwsec::{FwsecCommand, FwsecFirmware};
 use crate::firmware::{Firmware, FirmwareResources, FIRMWARE_VERSION};
+use crate::fsp::Fsp;
 use crate::gfw;
 use crate::gsp;
 use crate::gsp::commands::{get_gsp_info, gsp_init_done};
@@ -236,15 +237,35 @@ impl Gpu {
         Firmware::new(pdev.as_ref(), resources, chipset, FIRMWARE_VERSION)
     }
 
+    /// Load firmware using FSP falcon
+    fn load_firmware_fsp(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        chipset: Chipset,
+    ) -> Result<(Firmware, Falcon<FspEngine>)> {
+        let resources = FirmwareResources { bar, sec2: None };
+        let fw = Firmware::new(pdev.as_ref(), resources, chipset, FIRMWARE_VERSION)?;
+        let fsp_falcon = Falcon::<FspEngine>::new(pdev.as_ref(), chipset)?;
+        Ok((fw, fsp_falcon))
+    }
+
     /// Load firmware and create architecture-specific falcons
     fn load_firmware_for_arch(
         pdev: &pci::Device<device::Bound>,
         bar: &Bar0,
         chipset: Chipset,
-        sec2_falcon: &Falcon<Sec2>,
-    ) -> Result<Firmware> {
-        // For now, only SEC2-based architectures are supported
-        Self::load_firmware_sec2(pdev, bar, chipset, sec2_falcon)
+    ) -> Result<(Firmware, Option<Falcon<FspEngine>>)> {
+        match chipset.arch() {
+            Architecture::Turing | Architecture::Ampere | Architecture::Ada => {
+                let sec2_falcon = Falcon::<Sec2>::new(pdev.as_ref(), chipset)?;
+                let fw = Self::load_firmware_sec2(pdev, bar, chipset, &sec2_falcon)?;
+                Ok((fw, None))
+            }
+            Architecture::Hopper | Architecture::Blackwell => {
+                let (fw, fsp_falcon) = Self::load_firmware_fsp(pdev, bar, chipset)?;
+                Ok((fw, Some(fsp_falcon)))
+            }
+        }
     }
 
     /// Boot GSP using SEC2 falcon
@@ -300,6 +321,191 @@ impl Gpu {
             mbox1
         );
 
+        // Write OS version and wait for RISC-V
+        gsp_falcon.write_os_version(&bar, fw.bootloader.app_version)?;
+
+        // Poll for RISC-V to become active before running sequencer
+        util::wait_on(Delta::from_secs(5), || {
+            if gsp_falcon.is_riscv_active(&bar).unwrap_or(false) {
+                Some(())
+            } else {
+                None
+            }
+        })?;
+
+        dev_dbg!(
+            pdev.as_ref(),
+            "RISC-V active? {}\n",
+            gsp_falcon.is_riscv_active(&bar)?,
+        );
+
+        Ok(())
+    }
+
+    /// Check if GSP lockdown has been released after FSP Chain of Trust
+    fn gsp_lockdown_released(
+        pdev: &pci::Device<device::Bound>,
+        gsp_falcon: &Falcon<Gsp>,
+        bar: &Bar0,
+        fmc_boot_params_addr: u64,
+        mbox0: &mut u32,
+    ) -> bool {
+        // Read GSP falcon mailbox0
+        *mbox0 = match gsp_falcon.read_mailbox0(bar) {
+            Ok(val) => val,
+            Err(_) => return false, // Still inaccessible
+        };
+
+        // Check 1: If mbox0 has 0xbadf4100 pattern, GSP is still locked down
+        if *mbox0 != 0 && (*mbox0 & 0xffffff00) == 0xbadf4100 {
+            return false;
+        }
+
+        // Check 2: If mbox0 has a value, check if it's an error
+        if *mbox0 != 0 {
+            let mbox1 = match gsp_falcon.read_mailbox1(bar) {
+                Ok(val) => val,
+                Err(_) => return false, // Still inaccessible
+            };
+
+            let combined_addr = ((mbox1 as u64) << 32) | (*mbox0 as u64);
+            if combined_addr != fmc_boot_params_addr {
+                // Address doesn't match - GSP wrote an error code
+                // Return TRUE (lockdown released) with error
+                dev_dbg!(pdev.as_ref(),
+                    "GSP lockdown released with error: mbox0={:#x}, combined_addr={:#x}, expected={:#x}",
+                    *mbox0, combined_addr, fmc_boot_params_addr);
+                return true;
+            }
+        }
+
+        // Check 3: Verify HWCFG2 RISCV_BR_PRIV_LOCKDOWN bit is clear
+        let hwcfg2 = regs::NV_PFALCON_FALCON_HWCFG2::read(bar, &crate::falcon::gsp::Gsp::ID);
+        !hwcfg2.riscv_br_priv_lockdown()
+    }
+
+    /// Wait for GSP lockdown to be released after FSP Chain of Trust
+    fn wait_for_gsp_lockdown_release(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        gsp_falcon: &Falcon<Gsp>,
+        fmc_boot_params_addr: u64,
+    ) -> Result<u32> {
+        dev_dbg!(pdev.as_ref(), "Waiting for GSP lockdown release\n");
+
+        let mut mbox0: u32 = 0;
+
+        // Use wait_on_result with 4000ms timeout
+        util::wait_on_result(Delta::from_millis(4000), || {
+            if Self::gsp_lockdown_released(pdev, gsp_falcon, bar, fmc_boot_params_addr, &mut mbox0)
+            {
+                Some(Ok(mbox0)) // Lockdown released (with or without error)
+            } else {
+                None // Still waiting
+            }
+        })
+        .inspect_err(|_| {
+            dev_err!(pdev.as_ref(), "GSP lockdown release timeout\n");
+        })
+        .and_then(|mbox0| {
+            // Check mbox0 for error after wait completion
+            if mbox0 != 0 {
+                dev_err!(pdev.as_ref(), "GSP-FMC boot failed (mbox: {:#x})\n", mbox0);
+                Err(EIO)
+            } else {
+                dev_dbg!(
+                    pdev.as_ref(),
+                    "GSP hardware lockdown fully released, proceeding with initialization\n"
+                );
+                Ok(mbox0)
+            }
+        })
+    }
+
+    /// Boot GSP using FSP Chain of Trust
+    fn boot_gsp_via_fsp(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        chipset: Chipset,
+        fw: &Firmware,
+        _gsp_falcon: &Falcon<Gsp>,
+        fsp_falcon: &Falcon<FspEngine>,
+        libos: &GspMemObjects,
+        fb_layout: &FbLayout,
+    ) -> Result<()> {
+        dev_dbg!(
+            pdev.as_ref(),
+            "Using FSP Chain of Trust for Hopper/Blackwell boot...\n"
+        );
+
+        let libos_handle = libos.libos_dma_handle();
+        let wpr_handle = libos.wpr_meta.dma_handle();
+
+        // Get FMC firmware data
+        let (fmc_image, fmc_full) = fw.fmc_data().ok_or_else(|| {
+            dev_err!(pdev.as_ref(), "No FMC firmware for FSP architecture\n");
+            EINVAL
+        })?;
+
+        // Wait for FSP secure boot
+        Fsp::wait_secure_boot(pdev.as_ref(), bar, chipset.arch())?;
+
+        // Extract FMC signatures from full ELF
+        let fmc_full_data =
+            unsafe { core::slice::from_raw_parts(fmc_full.start_ptr(), fmc_full.size()) };
+        let signatures = Fsp::extract_fmc_signatures_static(pdev.as_ref(), fmc_full_data)?;
+
+        // Create FMC boot parameters
+        let fmc_boot_params = Fsp::create_fmc_boot_params(
+            pdev.as_ref(),
+            wpr_handle,
+            core::mem::size_of::<crate::nvfw::r570_144::GspFwWprMeta>() as u32,
+            libos_handle,
+        )?;
+
+        // Execute FSP Chain of Trust
+        // NOTE: FSP Chain of Trust handles GSP boot internally - we do NOT reset or boot GSP
+        Fsp::boot_gsp_fmc_with_signatures(
+            pdev.as_ref(),
+            bar,
+            chipset,
+            fmc_image,
+            &fmc_boot_params,
+            fb_layout.rsvd_size as u64,
+            false, // not resuming
+            &fsp_falcon,
+            &signatures,
+        )?;
+
+        // FSP Chain of Trust completes with GSP ready - no manual GSP boot needed
+        dev_dbg!(
+            pdev.as_ref(),
+            "FSP Chain of Trust completed - GSP boot handled by FSP\n"
+        );
+
+        // Wait for GSP lockdown to be released
+        let fmc_boot_params_addr = fmc_boot_params.dma_handle();
+        let _mbox0 =
+            Self::wait_for_gsp_lockdown_release(pdev, bar, _gsp_falcon, fmc_boot_params_addr)?;
+
+        // Write OS version after lockdown is released
+        _gsp_falcon.write_os_version(&bar, fw.bootloader.app_version)?;
+
+        // Poll for RISC-V to become active
+        util::wait_on(Delta::from_secs(5), || {
+            if _gsp_falcon.is_riscv_active(&bar).unwrap_or(false) {
+                Some(())
+            } else {
+                None
+            }
+        })?;
+
+        dev_dbg!(
+            pdev.as_ref(),
+            "RISC-V active? {}\n",
+            _gsp_falcon.is_riscv_active(&bar)?,
+        );
+
         Ok(())
     }
 
@@ -307,14 +513,28 @@ impl Gpu {
     fn boot_gsp_by_arch(
         pdev: &pci::Device<device::Bound>,
         bar: &Bar0,
+        chipset: Chipset,
         fw: &Firmware,
         gsp_falcon: &Falcon<Gsp>,
-        sec2_falcon: &Falcon<Sec2>,
+        fsp_falcon: Option<&Falcon<FspEngine>>,
         libos: &GspMemObjects,
-        _fb_layout: &FbLayout,
+        fb_layout: &FbLayout,
     ) -> Result<()> {
-        // For now, only SEC2-based architectures are supported
-        Self::boot_gsp_via_sec2(pdev, bar, fw, gsp_falcon, sec2_falcon, libos)
+        match chipset.arch() {
+            Architecture::Turing | Architecture::Ampere | Architecture::Ada => {
+                let sec2_falcon = Falcon::<Sec2>::new(pdev.as_ref(), chipset)?;
+                Self::boot_gsp_via_sec2(pdev, bar, fw, gsp_falcon, &sec2_falcon, libos)
+            }
+            Architecture::Hopper | Architecture::Blackwell => {
+                let fsp_falcon = fsp_falcon.ok_or_else(|| {
+                    dev_err!(pdev.as_ref(), "FSP falcon required for architecture\n");
+                    EINVAL
+                })?;
+                Self::boot_gsp_via_fsp(
+                    pdev, bar, chipset, fw, gsp_falcon, fsp_falcon, libos, fb_layout,
+                )
+            }
+        }
     }
 
     /// Run GSP sequencer for SEC2-based architectures
@@ -347,26 +567,54 @@ impl Gpu {
     fn maybe_run_sequencer(
         pdev: &pci::Device<device::Bound>,
         bar: &Bar0,
+        chipset: Chipset,
         fw: &Firmware,
         libos: &mut GspMemObjects,
         gsp_falcon: &Falcon<Gsp>,
-        sec2_falcon: &Falcon<Sec2>,
     ) -> Result<()> {
-        // For now, always run sequencer (only SEC2 architectures supported)
-        Self::run_gsp_sequencer(pdev, bar, fw, libos, gsp_falcon, sec2_falcon)
+        match chipset.arch() {
+            Architecture::Turing | Architecture::Ampere | Architecture::Ada => {
+                let sec2_falcon = Falcon::<Sec2>::new(pdev.as_ref(), chipset)?;
+                Self::run_gsp_sequencer(pdev, bar, fw, libos, gsp_falcon, &sec2_falcon)
+            }
+            Architecture::Hopper | Architecture::Blackwell => Ok(()),
+        }
     }
 
-    /// Run FWSEC-FRTS for architectures that require it
-    fn maybe_run_fwsec_frts(
+    /// Create VBIOS and run FWSEC-FRTS for architectures that require it
+    fn maybe_create_vbios_and_run_fwsec_frts(
         pdev: &pci::Device<device::Bound>,
         bar: &Bar0,
-        _chipset: Chipset,
+        chipset: Chipset,
         gsp_falcon: &Falcon<Gsp>,
-        bios: &Vbios,
         fb_layout: &FbLayout,
     ) -> Result<()> {
-        // For now, always run FWSEC-FRTS (only SEC2 architectures supported)
-        Self::run_fwsec_frts(pdev.as_ref(), gsp_falcon, bar, bios, fb_layout)
+        match chipset.arch() {
+            Architecture::Turing | Architecture::Ampere | Architecture::Ada => {
+                // SEC2 architectures need VBIOS parsing and FWSEC-FRTS
+                let bios = Vbios::new(pdev, bar)?;
+                Self::run_fwsec_frts(pdev.as_ref(), gsp_falcon, bar, &bios, fb_layout)
+            }
+            Architecture::Hopper | Architecture::Blackwell => {
+                // FSP architectures don't use VBIOS or FWSEC-FRTS
+                Ok(())
+            }
+        }
+    }
+
+    /// Wait for GFW boot completion on architectures that require it
+    fn maybe_wait_gfw_boot(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        chipset: Chipset,
+    ) -> Result<()> {
+        match chipset.arch() {
+            Architecture::Turing | Architecture::Ampere | Architecture::Ada => {
+                gfw::wait_gfw_boot_completion(bar)
+                    .inspect_err(|_| dev_err!(pdev.as_ref(), "GFW boot did not complete"))
+            }
+            Architecture::Hopper | Architecture::Blackwell => Ok(()),
+        }
     }
 
     /// Initialize debugfs for Nova GPU driver.
@@ -504,59 +752,43 @@ impl Gpu {
             spec.revision
         );
 
-        // We must wait for GFW_BOOT completion before doing any significant setup on the GPU.
-        gfw::wait_gfw_boot_completion(bar)
-            .inspect_err(|_| dev_err!(pdev.as_ref(), "GFW boot did not complete"))?;
+        // Wait for GFW boot completion on architectures that use it (SEC2-based)
+        Self::maybe_wait_gfw_boot(pdev, bar, spec.chipset)?;
 
         let sysmem_flush = SysmemFlush::register(pdev.as_ref(), bar, spec.chipset)?;
 
         let gsp_falcon = Falcon::<Gsp>::new(pdev.as_ref(), spec.chipset)?;
         gsp_falcon.clear_swgen0_intr(bar);
 
-        let sec2_falcon = Falcon::<Sec2>::new(pdev.as_ref(), spec.chipset)?;
-
-        let fw = Self::load_firmware_for_arch(pdev, bar, spec.chipset, &sec2_falcon)?;
+        let (fw, fsp_falcon) = Self::load_firmware_for_arch(pdev, bar, spec.chipset)?;
 
         let fb_layout = FbLayout::new(spec.chipset, bar, &fw)?;
         dev_dbg!(pdev.as_ref(), "{:#?}\n", fb_layout);
 
-        let bios = Vbios::new(pdev, bar)?;
-
-        Self::maybe_run_fwsec_frts(pdev, bar, spec.chipset, &gsp_falcon, &bios, &fb_layout)?;
+        Self::maybe_create_vbios_and_run_fwsec_frts(
+            pdev,
+            bar,
+            spec.chipset,
+            &gsp_falcon,
+            &fb_layout,
+        )?;
 
         let mut libos = gsp::GspMemObjects::new(pdev, bar, &fw, &fb_layout)?;
 
         Self::boot_gsp_by_arch(
             pdev,
             bar,
+            spec.chipset,
             &fw,
             &gsp_falcon,
-            &sec2_falcon,
+            fsp_falcon.as_ref(),
             &libos,
             &fb_layout,
         )?;
 
-        // Match what Nouveau does here:
-        gsp_falcon.write_os_version(&bar, fw.bootloader.app_version)?;
-
-        // Poll for RISC-V to become active before running sequencer
-        util::wait_on(Delta::from_secs(5), || {
-            if gsp_falcon.is_riscv_active(&bar).unwrap_or(false) {
-                Some(())
-            } else {
-                None
-            }
-        })?;
-
-        dev_dbg!(
-            pdev.as_ref(),
-            "RISC-V active? {}\n",
-            gsp_falcon.is_riscv_active(&bar)?,
-        );
-
         Self::init_debugfs(&libos);
 
-        Self::maybe_run_sequencer(pdev, bar, &fw, &mut libos, &gsp_falcon, &sec2_falcon)?;
+        Self::maybe_run_sequencer(pdev, bar, spec.chipset, &fw, &mut libos, &gsp_falcon)?;
 
         gsp_init_done(&mut libos.cmdq, Delta::from_secs(10))?;
         let info = get_gsp_info(&mut libos.cmdq, bar)?;

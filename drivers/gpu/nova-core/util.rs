@@ -46,7 +46,6 @@ pub(crate) fn wait_on<R, F: Fn() -> Option<R>>(timeout: Delta, cond: F) -> Resul
     }
 }
 
-#[expect(unused)]
 pub(crate) fn wait_on_result<R, F: FnMut() -> Option<Result<R>>>(
     timeout: Delta,
     mut cond: F,
