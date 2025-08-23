@@ -18,6 +18,15 @@ use crate::regs;
 
 mod hal;
 
+// Nova-specific heap parameter constants
+//
+// These constants override the generated bindings for architecture-specific heap sizing.
+const GSP_FW_HEAP_PARAM_BASE_RM_SIZE_GH100: u64 = 14 << 20; // 14MB for Hopper/Blackwell+
+const GSP_FW_HEAP_PARAM_CLIENT_ALLOC_SIZE_NOVA: u64 = 142 << 20; // 142MB client alloc for ~188MB total
+
+// Blackwell-specific minimum heap size (88 + 12 + 70 = 170MB, following Nouveau's r570)
+const GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS3_BAREMETAL_MIN_MB_BLACKWELL: u64 = 170 << 20;
+
 /// Type holding the sysmem flush memory page, a page of memory to be written into the
 /// `NV_PFB_NISO_FLUSH_SYSMEM_ADDR*` registers and used to maintain memory coherency.
 ///
@@ -97,22 +106,36 @@ pub(crate) fn calc_non_wpr_heap_size(chipset: Chipset) -> u64 {
 /// Computes the size of the WPR heap.
 fn calc_wpr_heap(chipset: Chipset, fb_size_gb: u64) -> u64 {
     let (carveout, heap_min) = if chipset >= Chipset::GA102 {
+        let min_size = if chipset.needs_large_reserved_mem() {
+            // Hopper/Blackwell uses 170MB minimum (88 + 12 + 70)
+            GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS3_BAREMETAL_MIN_MB_BLACKWELL
+        } else {
+            // Pre-Hopper/Blackwell uses 88MB minimum
+            (nvfw::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS3_BAREMETAL_MIN_MB as u64) << 20
+        };
         (
             nvfw::GSP_FW_HEAP_PARAM_OS_SIZE_LIBOS3_BAREMETAL as u64,
-            nvfw::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS3_BAREMETAL_MIN_MB << 20,
+            min_size,
         )
     } else {
         (
             nvfw::GSP_FW_HEAP_PARAM_OS_SIZE_LIBOS2 as u64,
-            nvfw::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS2_MIN_MB << 20,
+            (nvfw::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS2_MIN_MB as u64) << 20,
         )
     };
 
-    let base_rm_size = nvfw::GSP_FW_HEAP_PARAM_BASE_RM_SIZE_TU10X as u64;
+    let base_rm_size = if chipset.needs_large_reserved_mem() {
+        GSP_FW_HEAP_PARAM_BASE_RM_SIZE_GH100
+    } else {
+        nvfw::GSP_FW_HEAP_PARAM_BASE_RM_SIZE_TU10X as u64
+    };
     let per_gb_size = (nvfw::GSP_FW_HEAP_PARAM_SIZE_PER_GB_FB as u64 * fb_size_gb)
         .next_multiple_of(GSP_HEAP_SHIFT);
-    let client_alloc_size =
-        (nvfw::GSP_FW_HEAP_PARAM_CLIENT_ALLOC_SIZE as u64).next_multiple_of(GSP_HEAP_SHIFT);
+    let client_alloc_size = if chipset.needs_large_reserved_mem() {
+        GSP_FW_HEAP_PARAM_CLIENT_ALLOC_SIZE_NOVA.next_multiple_of(GSP_HEAP_SHIFT)
+    } else {
+        (nvfw::GSP_FW_HEAP_PARAM_CLIENT_ALLOC_SIZE as u64).next_multiple_of(GSP_HEAP_SHIFT)
+    };
 
     let calculated_size = carveout + base_rm_size + per_gb_size + client_alloc_size;
     core::cmp::max(calculated_size, heap_min as u64)
