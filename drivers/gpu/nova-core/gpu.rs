@@ -773,7 +773,7 @@ impl Gpu {
             &fb_layout,
         )?;
 
-        let mut libos = gsp::GspMemObjects::new(pdev, bar, &fw, &fb_layout)?;
+        let mut libos = gsp::GspMemObjects::new(pdev, bar, &fw, &fb_layout, spec.chipset)?;
 
         Self::boot_gsp_by_arch(
             pdev,

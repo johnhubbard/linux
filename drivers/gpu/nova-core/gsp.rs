@@ -183,6 +183,7 @@ impl GspMemObjects {
         bar: &Bar0,
         fw: &Firmware,
         fb_layout: &FbLayout,
+        chipset: crate::gpu::Chipset,
     ) -> Result<Self> {
         let dev = pdev.as_ref();
         let mut libos = CoherentAllocation::<fw::LibosMemoryRegionInitArgument>::alloc_coherent(
@@ -222,7 +223,7 @@ impl GspMemObjects {
         )?;
         dma_write!(rmargs[0].bDmemStack = 1)?;
 
-        set_system_info(&mut cmdq, pdev, bar)?;
+        set_system_info(&mut cmdq, pdev, bar, chipset)?;
         build_registry(&mut cmdq, bar)?;
 
         Ok(GspMemObjects {

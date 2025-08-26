@@ -12,6 +12,8 @@ use kernel::time::Delta;
 use kernel::transmute::{AsBytes, FromBytes};
 
 use crate::driver::Bar0;
+use crate::gpu::Architecture;
+use crate::gpu::Chipset;
 use crate::gsp::cmdq::{GspCommandToGsp, GspMessageFromGsp};
 use crate::gsp::GspCmdq;
 use crate::gsp::GSP_PAGE_SIZE;
@@ -27,7 +29,7 @@ unsafe impl AsBytes for fw::GspSystemInfo {}
 unsafe impl FromBytes for fw::GspStaticConfigInfo_t {}
 
 pub(crate) struct GspStaticConfigInfo {
-    pub gpu_name: [u8; 40],
+    pub gpu_name: [u8; 64],
 }
 
 // SAFETY: These structs don't meet the no-padding requirements of FromBytes but
@@ -91,9 +93,10 @@ pub(crate) fn get_gsp_info(cmdq: &mut GspCmdq, bar: &Bar0) -> Result<GspStaticCo
         .and_then(|cstr| cstr.to_str().ok())
         .unwrap_or("invalid utf8");
 
-    let mut gpu_name = [0u8; 40];
+    let mut gpu_name = [0u8; 64];
     let bytes = gpu_name_str.as_bytes();
-    let copy_len = core::cmp::min(bytes.len(), gpu_name.len());
+    // Reserve space for null terminator
+    let copy_len = core::cmp::min(bytes.len(), gpu_name.len() - 1);
     gpu_name[..copy_len].copy_from_slice(&bytes[..copy_len]);
     gpu_name[copy_len] = b'\0';
 
@@ -243,6 +246,7 @@ pub(crate) fn set_system_info(
     cmdq: &mut GspCmdq,
     dev: &pci::Device<device::Bound>,
     bar: &Bar0,
+    chipset: Chipset,
 ) -> Result {
     build_assert!(size_of::<fw::GspSystemInfo>() < GSP_PAGE_SIZE);
     let mut msg = cmdq.alloc_gsp_queue_command(size_of::<fw::GspSystemInfo>())?;
@@ -257,9 +261,17 @@ pub(crate) fn set_system_info(
         // Using TASK_SIZE in r535_gsp_rpc_set_system_info() seems wrong because
         // TASK_SIZE is per-task. That's probably a design issue in GSP-RM though.
         info.maxUserVa = (1 << 47) - 4096;
-        info.pciConfigMirrorBase = 0x088000;
-        info.pciConfigMirrorSize = 0x001000;
 
+        match chipset.arch() {
+            Architecture::Turing | Architecture::Ampere | Architecture::Ada => {
+                info.pciConfigMirrorBase = 0x88000;
+            }
+            Architecture::Hopper | Architecture::Blackwell => {
+                info.pciConfigMirrorBase = 0x092000;
+            }
+        }
+
+        info.pciConfigMirrorSize = 0x001000;
         info.PCIDeviceID = (u32::from(dev.device_id()) << 16) | pci::Vendor::NVIDIA.as_raw();
         info.PCISubDeviceID =
             (u32::from(dev.subsystem_device_id()) << 16) | u32::from(dev.subsystem_vendor_id());
