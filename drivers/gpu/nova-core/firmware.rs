@@ -471,9 +471,9 @@ impl Firmware {
             gsp_sigs,
             arch_data: ArchFirmwareData::Sec2 {
                 booter_loader: request("booter_load")
-                    .and_then(|fw| BooterFirmware::new(dev, &fw, sec2, bar))?,
+                    .and_then(|fw| BooterFirmware::new(dev, &fw, sec2, bar, chipset))?,
                 booter_unloader: request("booter_unload")
-                    .and_then(|fw| BooterFirmware::new(dev, &fw, sec2, bar))?,
+                    .and_then(|fw| BooterFirmware::new(dev, &fw, sec2, bar, chipset))?,
             },
         })
     }
