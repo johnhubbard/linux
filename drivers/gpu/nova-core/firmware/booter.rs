@@ -229,6 +229,8 @@ pub(crate) struct BooterFirmware {
     imem_load_target: FalconLoadTarget,
     // Load parameters for `DMEM` falcon memory.
     dmem_load_target: FalconLoadTarget,
+    // Load parameters for `NMEM` falcon memory, used only on Turing and GA100
+    nmem_load_target: Option<FalconLoadTarget>,
     // BROM falcon parameters.
     brom_params: FalconBromParams,
     // Device-mapped firmware image.
@@ -319,6 +321,8 @@ impl BooterFirmware {
                 dst_start: 0,
                 len: load_hdr.os_data_size,
             },
+            // The NMEM segment exists only in the booter image for Turing and GA100
+            nmem_load_target: None,
             brom_params,
             ucode: ucode_signed,
         })
@@ -332,6 +336,10 @@ impl FalconLoadParams for BooterFirmware {
 
     fn dmem_load_params(&self) -> FalconLoadTarget {
         self.dmem_load_target.clone()
+    }
+
+    fn nmem_load_params(&self) -> Option<FalconLoadTarget> {
+        self.nmem_load_target.clone()
     }
 
     fn brom_params(&self) -> FalconBromParams {
