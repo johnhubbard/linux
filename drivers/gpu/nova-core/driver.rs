@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 
+use core::sync::atomic::{
+    AtomicU32,
+    Ordering, //
+};
+
 use kernel::{
     auxiliary,
     device::Core,
@@ -16,6 +21,9 @@ use kernel::{
 };
 
 use crate::gpu::Gpu;
+
+/// Counter for generating unique auxiliary device IDs.
+static AUXILIARY_ID_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 #[pin_data]
 pub(crate) struct NovaCore {
@@ -70,12 +78,17 @@ impl pci::Driver for NovaCore {
                 GFP_KERNEL,
             )?;
 
+            // TODO[XARR]: Use XArray for proper ID allocation/recycling. Until then, use a simple
+            // atomic counter which never recycles IDs. A unique ID is required for multi-GPU
+            // systems, because without it, probe() would fail for all but the first GPU.
+            let aux_id = AUXILIARY_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+
             Ok(try_pin_init!(Self {
                 gpu <- Gpu::new(pdev, bar.clone(), bar.access(pdev.as_ref())?),
                 _reg <- auxiliary::Registration::new(
                     pdev.as_ref(),
                     c"nova-drm",
-                    0, // TODO[XARR]: Once it lands, use XArray; for now we don't use the ID.
+                    aux_id,
                     crate::MODULE_NAME
                 ),
             }))
