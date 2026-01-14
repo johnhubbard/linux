@@ -170,6 +170,18 @@ impl Architecture {
             Self::Hopper | Self::Blackwell => DmaMask::new::<52>(),
         }
     }
+
+    /// Returns whether the GPU uses GFW_BOOT for firmware loading.
+    ///
+    /// Pre-Hopper architectures (Turing, Ampere, Ada) require waiting for GFW_BOOT completion
+    /// before any significant GPU setup. Hopper and later use the FSP Chain of Trust boot path
+    /// instead.
+    pub(crate) const fn needs_gfw_boot(&self) -> bool {
+        match self {
+            Self::Turing | Self::Ampere | Self::Ada => true,
+            _ => false,
+        }
+    }
 }
 
 impl TryFrom<u8> for Architecture {
@@ -315,11 +327,11 @@ impl Gpu {
             let chipset = spec.chipset();
 
             Ok(try_pin_init!(Self {
-                // We must wait for GFW_BOOT completion before doing any significant setup
-                // on the GPU.
                 _: {
-                    gfw::wait_gfw_boot_completion(bar)
-                        .inspect_err(|_| dev_err!(pdev, "GFW boot did not complete\n"))?;
+                    if chipset.arch().needs_gfw_boot() {
+                        gfw::wait_gfw_boot_completion(bar)
+                            .inspect_err(|_| dev_err!(pdev, "GFW boot did not complete\n"))?;
+                    }
                 },
 
                 sysmem_flush: SysmemFlush::register(pdev.as_ref(), bar, chipset)?,
