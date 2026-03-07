@@ -264,7 +264,7 @@ register! {
     }
 
     pub(crate) NV_PFALCON_FALCON_DMATRFCMD(u32) @ PFalconBase + 0x00000118 {
-        16:16   set_dmtag;
+        16:16   set_dmtag => bool;
         14:12   ctxdma;
         10:8    size ?=> DmaTrfCmdSize;
         5:5     is_write => bool;

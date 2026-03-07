@@ -133,10 +133,23 @@ pub(crate) enum FalconMem {
     /// Secure Instruction Memory.
     ImemSecure,
     /// Non-Secure Instruction Memory.
-    #[expect(unused)]
+    #[expect(dead_code)]
     ImemNonSecure,
     /// Data Memory.
     Dmem,
+}
+
+/// Source offset of a raw falcon DMA transfer, added to the DMA base address.
+#[expect(dead_code)]
+#[derive(Copy, Clone)]
+pub(crate) enum FalconDmaSrcOffset {
+    /// Byte offset from the DMA base address.
+    Offset(u32),
+    /// DMEM virtual address. The DMA engine also tags each loaded block with this value, so the
+    /// falcon reaches the data through its DMEM VA. The caller must bias the DMA base address so
+    /// that base plus this value addresses the first byte of the image. Only valid with
+    /// [`FalconMem::Dmem`].
+    DmemVa(u32),
 }
 
 bounded_enum! {
@@ -592,6 +605,112 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
         Ok(())
     }
 
+    /// Perform a raw DMA transfer from a physical address to falcon IMEM or DMEM.
+    ///
+    /// Used by the GSP boot event handlers where the firmware provides the source
+    /// address directly (in GPU physical address space, routed through the FBIF
+    /// aperture). The caller must configure the FBIF TRANSCFG register
+    /// corresponding to `ctx_dma` before calling this method.
+    ///
+    /// A [`FalconDmaSrcOffset::DmemVa`] source offset also sets `DMATRFCMD.SET_DMTAG`, and
+    /// requires `target_mem` to be [`FalconMem::Dmem`].
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` if `ctx_dma` is not a valid context DMA slot, if `src_addr` is not aligned to
+    ///   256 bytes, or if a [`FalconDmaSrcOffset::DmemVa`] source offset is paired with an IMEM
+    ///   target.
+    /// - `ERANGE` if `src_addr` does not fit the `DMATRFBASE` register pair.
+    /// - `EOVERFLOW` if a per-block source or destination offset exceeds `u32`.
+    #[expect(dead_code)]
+    pub(crate) fn raw_dma_transfer(
+        &self,
+        ctx_dma: u8,
+        src_addr: u64,
+        target_mem: FalconMem,
+        src: FalconDmaSrcOffset,
+        dst_offset: u32,
+        len: u32,
+    ) -> Result {
+        const DMA_LEN: u32 = num::usize_into_u32::<{ MEM_BLOCK_ALIGNMENT }>();
+        const NUM_CTXDMA_SLOTS: u8 = 8;
+
+        if ctx_dma >= NUM_CTXDMA_SLOTS {
+            dev_err!(self.dev, "raw DMA: ctx_dma {} out of range\n", ctx_dma);
+            return Err(EINVAL);
+        }
+
+        if src_addr % u64::from(DMA_LEN) > 0 {
+            dev_err!(
+                self.dev,
+                "raw DMA: source address {:#x} not 256B-aligned\n",
+                src_addr
+            );
+            return Err(EINVAL);
+        }
+
+        if src_addr >> 40 > u64::from(regs::NV_PFALCON_FALCON_DMATRFBASE1::BASE_MASK) {
+            dev_err!(
+                self.dev,
+                "raw DMA: source address {:#x} does not fit DMATRFBASE\n",
+                src_addr
+            );
+            return Err(ERANGE);
+        }
+
+        let (src_offset, set_dmtag) = match src {
+            FalconDmaSrcOffset::Offset(offset) => (offset, false),
+            // `SET_DMTAG` applies to DMEM only.
+            FalconDmaSrcOffset::DmemVa(_) if target_mem != FalconMem::Dmem => return Err(EINVAL),
+            FalconDmaSrcOffset::DmemVa(va) => (va, true),
+        };
+
+        let num_transfers = len.div_ceil(DMA_LEN);
+
+        self.bar.write(
+            WithBase::of::<E>(),
+            regs::NV_PFALCON_FALCON_DMATRFBASE::zeroed().with_base(
+                // CAST: `as u32` is used on purpose since we do want to strip the upper bits,
+                // which will be written to `NV_PFALCON_FALCON_DMATRFBASE1`.
+                (src_addr >> 8) as u32,
+            ),
+        );
+        self.bar.write(
+            WithBase::of::<E>(),
+            regs::NV_PFALCON_FALCON_DMATRFBASE1::zeroed().try_with_base(src_addr >> 40)?,
+        );
+
+        let cmd = regs::NV_PFALCON_FALCON_DMATRFCMD::zeroed()
+            .with_size(DmaTrfCmdSize::Size256B)
+            .try_with_ctxdma(u32::from(ctx_dma))?
+            .with_falcon_mem(target_mem)
+            .with_set_dmtag(set_dmtag);
+
+        for pos in (0..num_transfers).map(|i| i * DMA_LEN) {
+            self.bar.write(
+                WithBase::of::<E>(),
+                regs::NV_PFALCON_FALCON_DMATRFMOFFS::zeroed()
+                    .try_with_offs(dst_offset.checked_add(pos).ok_or(EOVERFLOW)?)?,
+            );
+            self.bar.write(
+                WithBase::of::<E>(),
+                regs::NV_PFALCON_FALCON_DMATRFFBOFFS::zeroed()
+                    .with_offs(src_offset.checked_add(pos).ok_or(EOVERFLOW)?),
+            );
+
+            self.bar.write(WithBase::of::<E>(), cmd);
+
+            read_poll_timeout(
+                || Ok(self.bar.read(regs::NV_PFALCON_FALCON_DMATRFCMD::of::<E>())),
+                |r| r.idle(),
+                Delta::ZERO,
+                Delta::from_secs(2),
+            )?;
+        }
+
+        Ok(())
+    }
+
     /// Perform a DMA load into `IMEM` and `DMEM` of `fw`, and prepare the falcon to run it.
     fn dma_load<F: FalconFirmware<Target = E> + FalconDmaLoadable>(&self, fw: &F) -> Result {
         // DMA object with firmware content as the source of the DMA engine.
@@ -640,6 +759,24 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
         read_poll_timeout(
             || Ok(self.bar.read(regs::NV_PFALCON_FALCON_CPUCTL::of::<E>())),
             |r| r.halted(),
+            Delta::ZERO,
+            Delta::from_secs(2),
+        )?;
+
+        Ok(())
+    }
+
+    /// Wait until the GSP processor has suspended.
+    ///
+    /// The RISC-V GSP signals suspension by setting bit 31 (`0x8000_0000`) in `MAILBOX0`, rather
+    /// than through `CPUCTL.halted`.
+    #[expect(dead_code)]
+    pub(crate) fn wait_for_processor_suspend(&self) -> Result<()> {
+        const INTERRUPT_PROCESSOR_SUSPENDED: u32 = 0x8000_0000;
+
+        read_poll_timeout(
+            || Ok(self.read_mailbox0()),
+            |val| (*val & INTERRUPT_PROCESSOR_SUSPENDED) != 0,
             Delta::ZERO,
             Delta::from_secs(2),
         )?;
