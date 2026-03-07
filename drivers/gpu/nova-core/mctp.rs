@@ -42,13 +42,24 @@ bitfield! {
         29:28 seq;
         /// Source endpoint ID.
         23:16 seid;
+        /// Destination endpoint ID.
+        15:8 deid;
+        /// MCTP header version.
+        3:0 version;
     }
 }
 
 impl MctpHeader {
-    /// Builds a single-packet MCTP header (`SOM=1`, `EOM=1`, `SEQ=0`, `SEID=0`).
+    /// The only header version FSP accepts.
+    const VERSION: u32 = 1;
+
+    /// Builds a header for a message that fits in one packet. Every field except `SOM`, `EOM`
+    /// and the version is zero.
     pub(crate) fn single_packet() -> Self {
-        Self::zeroed().with_som(true).with_eom(true)
+        Self::zeroed()
+            .with_const_version::<{ Self::VERSION }>()
+            .with_som(true)
+            .with_eom(true)
     }
 
     /// Returns whether this is a complete single-packet message (`SOM=1` and `EOM=1`).
