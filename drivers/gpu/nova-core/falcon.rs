@@ -5,6 +5,7 @@
 use hal::FalconHal;
 
 use kernel::{
+    bits,
     device,
     dma::{
         Coherent,
@@ -20,7 +21,7 @@ use kernel::{
     },
     prelude::*,
     sizes::SZ_4K,
-    time::Delta,
+    time::Delta, //
 };
 
 use crate::{
@@ -42,6 +43,9 @@ pub(crate) mod sec2;
 
 /// Alignment (in bytes) of falcon memory blocks.
 pub(crate) const MEM_BLOCK_ALIGNMENT: usize = 256;
+
+/// DMEM virtual address value that means "no virtual address assigned".
+const FLCN_DMEM_VA_INVALID: u32 = 0xffff_ffff;
 
 bounded_enum! {
     /// Revision number of a falcon core, used in the [`crate::regs::NV_PFALCON_FALCON_HWCFG1`]
@@ -132,10 +136,34 @@ pub(crate) enum FalconMem {
     /// Secure Instruction Memory.
     ImemSecure,
     /// Non-Secure Instruction Memory.
-    #[expect(unused)]
+    #[expect(dead_code)]
     ImemNonSecure,
     /// Data Memory.
     Dmem,
+}
+
+/// Where a raw falcon DMA transfer reads its image from, relative to the DMA base address.
+#[derive(Copy, Clone)]
+pub(crate) enum FalconDmaSrcOffset {
+    /// The image starts this many bytes past the DMA base address.
+    Offset(u32),
+    /// Virtual address of the image in the target memory. The DMA engine tags each loaded block
+    /// with this value and adds the tag to the base address, so the base address must be the
+    /// source address minus this value.
+    Va(u32),
+}
+
+impl FalconDmaSrcOffset {
+    /// Returns the source offset of a DMEM image at virtual address `dmem_va`, or the start of the
+    /// source when `dmem_va` is `FLCN_DMEM_VA_INVALID`.
+    #[expect(dead_code)]
+    pub(crate) fn from_dmem_va(dmem_va: u32) -> Self {
+        if dmem_va == FLCN_DMEM_VA_INVALID {
+            Self::Offset(0)
+        } else {
+            Self::Va(dmem_va)
+        }
+    }
 }
 
 bounded_enum! {
@@ -600,6 +628,98 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
         Ok(())
     }
 
+    /// Transfers `len` bytes from `src_addr` into this falcon's `target_mem`.
+    ///
+    /// `src_addr` is a GPU physical address reached through the FBIF aperture, so the caller must
+    /// program `NV_PFALCON_FBIF_TRANSCFG` for `ctx_dma` before calling this.
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` if `ctx_dma` is not a context DMA slot that the falcon has, or if `src_addr` is
+    ///   not 256-byte aligned.
+    /// - `ERANGE` if `src_addr` does not fit the `DMATRFBASE` register pair.
+    /// - `EOVERFLOW` if a per-block source or destination offset exceeds `u32`.
+    #[expect(dead_code)]
+    pub(crate) fn raw_dma_transfer(
+        &self,
+        ctx_dma: u32,
+        src_addr: u64,
+        target_mem: FalconMem,
+        src: FalconDmaSrcOffset,
+        dst_offset: u32,
+        len: u32,
+    ) -> Result {
+        const DMA_LEN: u32 = num::usize_into_u32::<{ MEM_BLOCK_ALIGNMENT }>();
+
+        if src_addr % u64::from(DMA_LEN) > 0 {
+            dev_err!(
+                self.dev,
+                "raw DMA: source address {:#x} not 256B-aligned\n",
+                src_addr
+            );
+            return Err(EINVAL);
+        }
+
+        if src_addr >> 40 > u64::from(regs::NV_PFALCON_FALCON_DMATRFBASE1::BASE_MASK) {
+            dev_err!(
+                self.dev,
+                "raw DMA: source address {:#x} does not fit DMATRFBASE\n",
+                src_addr
+            );
+            return Err(ERANGE);
+        }
+
+        // An IMEM block is always tagged with its source offset. A DMEM block is tagged only when
+        // `SET_DMTAG` is set, so a DMEM virtual address sets `SET_DMTAG`.
+        let (src_offset, set_dmtag) = match src {
+            FalconDmaSrcOffset::Offset(offset) => (offset, false),
+            FalconDmaSrcOffset::Va(va) => (va, target_mem == FalconMem::Dmem),
+        };
+
+        let num_transfers = len.div_ceil(DMA_LEN);
+
+        self.pfalcon
+            .write_reg(regs::NV_PFALCON_FALCON_DMATRFBASE::zeroed().with_base(
+                // CAST: this drops the upper bits on purpose. They are written to
+                // `NV_PFALCON_FALCON_DMATRFBASE1` next.
+                (src_addr >> 8) as u32,
+            ));
+        self.pfalcon.write_reg(
+            regs::NV_PFALCON_FALCON_DMATRFBASE1::zeroed().try_with_base(src_addr >> 40)?,
+        );
+
+        // The `CTXDMA` field holds exactly the indices of the falcon's `TRANSCFG` slots, so the
+        // field's range is the bound on the slot.
+        let cmd = regs::NV_PFALCON_FALCON_DMATRFCMD::zeroed()
+            .with_size(DmaTrfCmdSize::Size256B)
+            .try_with_ctxdma(ctx_dma)
+            .map_err(|_| EINVAL)?
+            .with_falcon_mem(target_mem)
+            .with_set_dmtag(set_dmtag);
+
+        for pos in (0..num_transfers).map(|i| i * DMA_LEN) {
+            self.pfalcon.write_reg(
+                regs::NV_PFALCON_FALCON_DMATRFMOFFS::zeroed()
+                    .try_with_offs(dst_offset.checked_add(pos).ok_or(EOVERFLOW)?)?,
+            );
+            self.pfalcon.write_reg(
+                regs::NV_PFALCON_FALCON_DMATRFFBOFFS::zeroed()
+                    .with_offs(src_offset.checked_add(pos).ok_or(EOVERFLOW)?),
+            );
+
+            self.pfalcon.write_reg(cmd);
+
+            read_poll_timeout(
+                || Ok(self.pfalcon.read(regs::NV_PFALCON_FALCON_DMATRFCMD)),
+                |r| r.idle(),
+                Delta::ZERO,
+                Delta::from_secs(2),
+            )?;
+        }
+
+        Ok(())
+    }
+
     /// Perform a DMA load into `IMEM` and `DMEM` of `fw`, and prepare the falcon to run it.
     fn dma_load<F: FalconFirmware<Target = E> + FalconDmaLoadable>(&self, fw: &F) -> Result {
         // DMA object with firmware content as the source of the DMA engine.
@@ -651,6 +771,32 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
         )?;
 
         Ok(())
+    }
+
+    /// Returns `true` if the RISC-V core has suspended.
+    pub(crate) fn is_processor_suspended(&self) -> bool {
+        const INTERRUPT_PROCESSOR_SUSPENDED: u32 = bits::bit_u32(31);
+
+        self.read_mailbox0() & INTERRUPT_PROCESSOR_SUSPENDED != 0
+    }
+
+    /// Waits until the RISC-V core has suspended.
+    ///
+    /// The caller must write `MAILBOX0` before starting the core, or this returns as soon as it
+    /// reads the previous suspend.
+    ///
+    /// # Errors
+    ///
+    /// - `ETIMEDOUT` if the core has not suspended within two seconds.
+    #[expect(dead_code)]
+    pub(crate) fn wait_for_processor_suspend(&self) -> Result {
+        read_poll_timeout(
+            || Ok(self.is_processor_suspended()),
+            |suspended| *suspended,
+            Delta::ZERO,
+            Delta::from_secs(2),
+        )
+        .map(|_| ())
     }
 
     /// Start the falcon CPU.
