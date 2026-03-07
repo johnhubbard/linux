@@ -67,22 +67,18 @@ impl Radix3 {
             Ok(try_pin_init!(Self {
                 data <- SGTable::new(dev, data, DataDirection::ToDevice, GFP_KERNEL),
                 level2 <- {
-                    VVec::<u8>::with_capacity(
-                        data.iter().count() * core::mem::size_of::<u64>(),
-                        GFP_KERNEL,
-                    )
-                    .map_err(|_| ENOMEM)
-                    .and_then(|level2| map_into_lvl(&data, level2))
-                    .map(|level2| SGTable::new(dev, level2, DataDirection::ToDevice, GFP_KERNEL))?
+                    let level2 = VVec::<u8>::with_capacity(lvl_size(&data), GFP_KERNEL)
+                        .map_err(|_| ENOMEM)
+                        .and_then(|level2| map_into_lvl(&data, level2))?;
+
+                    SGTable::new(dev, level2, DataDirection::ToDevice, GFP_KERNEL)
                 },
                 level1 <- {
-                    VVec::<u8>::with_capacity(
-                        level2.iter().count() * core::mem::size_of::<u64>(),
-                        GFP_KERNEL,
-                    )
-                    .map_err(|_| ENOMEM)
-                    .and_then(|level1| map_into_lvl(&level2, level1))
-                    .map(|level1| SGTable::new(dev, level1, DataDirection::ToDevice, GFP_KERNEL))?
+                    let level1 = VVec::<u8>::with_capacity(lvl_size(&level2), GFP_KERNEL)
+                        .map_err(|_| ENOMEM)
+                        .and_then(|level1| map_into_lvl(&level2, level1))?;
+
+                    SGTable::new(dev, level1, DataDirection::ToDevice, GFP_KERNEL)
                 },
                 level0: {
                     let level1_entry = level1.iter().next().ok_or(EINVAL)?;
@@ -113,6 +109,17 @@ impl Radix3 {
     }
 }
 
+/// Returns the size, in bytes, of the page table level that maps `sg_table`: one `u64` entry per
+/// 4KB page it spans, rounded up to the page boundary that [`map_into_lvl`] pads to.
+fn lvl_size(sg_table: &SGTable<Owned<VVec<u8>>>) -> usize {
+    let entries: usize = sg_table
+        .iter()
+        .map(|sg_entry| usize::from_safe_cast(sg_entry.dma_len()).div_ceil(GSP_PAGE_SIZE))
+        .sum();
+
+    (entries * size_of::<u64>()).next_multiple_of(GSP_PAGE_SIZE)
+}
+
 /// Build a page table from a scatter-gather list.
 ///
 /// Takes each DMA-mapped region from `sg_table` and writes page table entries
@@ -128,6 +135,11 @@ fn map_into_lvl(sg_table: &SGTable<Owned<VVec<u8>>>, mut dst: VVec<u8>) -> Resul
             dst.extend_from_slice(&entry.to_le_bytes(), GFP_KERNEL)?;
         }
     }
+
+    // The last page of a level is only partly filled, and the booter DMAs each level a
+    // whole page at a time, so no entry past the last valid one may hold a stale address.
+    let padded = dst.len().next_multiple_of(GSP_PAGE_SIZE);
+    dst.resize(padded, 0, GFP_KERNEL)?;
 
     Ok(dst)
 }
