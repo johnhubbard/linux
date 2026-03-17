@@ -359,6 +359,25 @@ impl TryFrom<u32> for MsgFunction {
     }
 }
 
+impl MsgFunction {
+    /// Returns true if this is a GSP-initiated async event (`NV_VGPU_MSG_EVENT_*`), as opposed to
+    /// a command response (`NV_VGPU_MSG_FUNCTION_*`).
+    pub(crate) fn is_event(&self) -> bool {
+        matches!(
+            self,
+            Self::GspInitDone
+                | Self::GspRunCpuSequencer
+                | Self::PostEvent
+                | Self::RcTriggered
+                | Self::MmuFaultQueued
+                | Self::OsErrorLog
+                | Self::GspPostNoCat
+                | Self::GspLockdownNotice
+                | Self::UcodeLibOsPrint //
+        )
+    }
+}
+
 impl From<MsgFunction> for u32 {
     fn from(value: MsgFunction) -> Self {
         // CAST: `MsgFunction` is `repr(u32)` and can thus be cast losslessly.
