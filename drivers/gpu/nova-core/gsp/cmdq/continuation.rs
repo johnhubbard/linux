@@ -147,6 +147,7 @@ impl<C: CommandToGsp> SplitCommand<C> {
 
 impl<C: CommandToGsp> CommandToGsp for SplitCommand<C> {
     const FUNCTION: MsgFunction = C::FUNCTION;
+    const IS_ASYNC: bool = C::IS_ASYNC;
     type Command = C::Command;
     type Reply = C::Reply;
     type InitError = C::InitError;
