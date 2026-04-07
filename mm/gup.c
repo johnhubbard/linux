@@ -1816,6 +1816,7 @@ long populate_vma_page_range(struct vm_area_struct *vma,
 	struct mm_struct *mm = vma->vm_mm;
 	unsigned long nr_pages = (end - start) / PAGE_SIZE;
 	int local_locked = 1;
+	bool need_drain;
 	int gup_flags;
 	long ret;
 
@@ -1857,9 +1858,19 @@ long populate_vma_page_range(struct vm_area_struct *vma,
 	 * We made sure addr is within a VMA, so the following will
 	 * not result in a stack expansion that recurses back here.
 	 */
+	/*
+	 * Read VM_LOCKED before __get_user_pages(), which may drop
+	 * mmap_lock when FOLL_UNLOCKABLE is set, after which the vma
+	 * must not be accessed. The read is stable: mmap_lock is held
+	 * for read here, so mlock() (which needs the write lock)
+	 * cannot change VM_LOCKED concurrently.
+	 */
+	need_drain = vma->vm_flags & VM_LOCKED;
+
 	ret = __get_user_pages(mm, start, nr_pages, gup_flags,
 			       NULL, locked ? locked : &local_locked);
-	lru_add_drain();
+	if (need_drain)
+		lru_add_drain();
 	return ret;
 }
 
