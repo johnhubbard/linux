@@ -6,6 +6,9 @@
 #include <linux/ktime.h>
 #include <linux/debugfs.h>
 #include <linux/highmem.h>
+#include <linux/kthread.h>
+#include <linux/delay.h>
+#include <linux/sched/mm.h>
 #include "gup_test.h"
 
 static void put_back_pages(unsigned int cmd, struct page **pages,
@@ -311,6 +314,171 @@ static inline int pin_longterm_test_read(unsigned long arg)
 	return 0;
 }
 
+/*
+ * Racing worker that repeatedly takes and drops a transient (non-FOLL_LONGTERM)
+ * reference on every page in the test range. This simulates what real-world
+ * components (CUDA/UVM, NUMA balancing, KSM, etc.) do on GH200 and other
+ * systems, and is what ultimately defeats the NR_MAX_MIGRATE_PAGES_RETRY=10
+ * retry loop inside migrate_pages(), turning a should-be-transient refcount
+ * mismatch into a permanent -ENOMEM returned from pin_user_pages(FOLL_LONGTERM).
+ */
+struct pin_longterm_race_ctx {
+	struct mm_struct	*mm;
+	unsigned long		addr;
+	unsigned long		nr_pages;
+	atomic_t		stop;
+};
+
+static int pin_longterm_race_worker(void *data)
+{
+	struct pin_longterm_race_ctx *ctx = data;
+	struct page **pages;
+	long got;
+
+	pages = kvcalloc(ctx->nr_pages, sizeof(*pages), GFP_KERNEL);
+	if (!pages)
+		return -ENOMEM;
+
+	kthread_use_mm(ctx->mm);
+
+	while (!atomic_read(&ctx->stop) && !kthread_should_stop()) {
+		got = get_user_pages_fast(ctx->addr, ctx->nr_pages, 0, pages);
+		if (got > 0) {
+			/*
+			 * Drop the refs immediately so this is visible as a
+			 * *transient* refcount bump, similar to what other
+			 * kernel components do. release_pages() handles
+			 * compound/folio cases correctly.
+			 */
+			release_pages(pages, got);
+		}
+		cond_resched();
+	}
+
+	kthread_unuse_mm(ctx->mm);
+	kvfree(pages);
+	return 0;
+}
+
+static int pin_longterm_race_test(unsigned long arg)
+{
+	struct pin_longterm_race args;
+	struct pin_longterm_race_ctx ctx = { };
+	struct task_struct *worker;
+	struct page **pin_pages = NULL;
+	unsigned long nr_pages;
+	unsigned int iter;
+	unsigned int gup_flags = FOLL_LONGTERM;
+	bool fast, verbose;
+	int ret = 0;
+
+	if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
+		return -EFAULT;
+
+	if (args.flags &
+	    ~(PIN_LONGTERM_TEST_FLAG_USE_WRITE | PIN_LONGTERM_TEST_FLAG_USE_FAST |
+	      PIN_LONGTERM_TEST_FLAG_VERBOSE))
+		return -EINVAL;
+	if (!IS_ALIGNED(args.addr | args.size, PAGE_SIZE))
+		return -EINVAL;
+	if (!args.nr_iterations || args.size == 0 || args.size > LONG_MAX)
+		return -EINVAL;
+
+	nr_pages = args.size / PAGE_SIZE;
+	if (!nr_pages || nr_pages > ULONG_MAX / sizeof(struct page *))
+		return -EINVAL;
+
+	if (args.flags & PIN_LONGTERM_TEST_FLAG_USE_WRITE)
+		gup_flags |= FOLL_WRITE;
+	fast = !!(args.flags & PIN_LONGTERM_TEST_FLAG_USE_FAST);
+	verbose = !!(args.flags & PIN_LONGTERM_TEST_FLAG_VERBOSE);
+
+	pin_pages = kvcalloc(nr_pages, sizeof(*pin_pages), GFP_KERNEL);
+	if (!pin_pages)
+		return -ENOMEM;
+
+	args.nr_success = 0;
+	args.nr_failure = 0;
+	args.last_errno = 0;
+	args.first_failure_iter = ~0U;
+
+	/*
+	 * Keep a user reference on the caller's mm so the worker may safely
+	 * access user pages via kthread_use_mm(). Dropped after kthread_stop().
+	 * The caller is blocked in this ioctl so current->mm is guaranteed
+	 * to still have a live mm_users reference; mmget() is safe.
+	 */
+	mmget(current->mm);
+	ctx.mm = current->mm;
+	ctx.addr = args.addr;
+	ctx.nr_pages = nr_pages;
+	atomic_set(&ctx.stop, 0);
+
+	worker = kthread_run(pin_longterm_race_worker, &ctx,
+			     "gup_lt_race");
+	if (IS_ERR(worker)) {
+		ret = PTR_ERR(worker);
+		mmput(ctx.mm);
+		goto out;
+	}
+
+	/* Give the worker a moment to start spinning. */
+	msleep(10);
+
+	for (iter = 0; iter < args.nr_iterations; iter++) {
+		long nr;
+
+		if (fast) {
+			nr = pin_user_pages_fast(args.addr, nr_pages,
+						 gup_flags, pin_pages);
+		} else {
+			if (mmap_read_lock_killable(current->mm)) {
+				ret = -EINTR;
+				break;
+			}
+			nr = pin_user_pages(args.addr, nr_pages,
+					    gup_flags, pin_pages);
+			mmap_read_unlock(current->mm);
+		}
+
+		if (nr == (long)nr_pages) {
+			args.nr_success++;
+			unpin_user_pages(pin_pages, nr);
+		} else {
+			if (args.first_failure_iter == ~0U)
+				args.first_failure_iter = iter;
+			args.nr_failure++;
+			if (nr < 0) {
+				args.last_errno = (int)nr;
+			} else {
+				args.last_errno = -ENOMEM;
+				if (nr > 0)
+					unpin_user_pages(pin_pages, nr);
+			}
+			if (verbose)
+				pr_info("gup_test: FOLL_LONGTERM pin FAIL iter=%u got=%ld/%lu err=%pe\n",
+					iter, nr, nr_pages,
+					ERR_PTR(args.last_errno));
+		}
+
+		if (signal_pending(current)) {
+			ret = -EINTR;
+			break;
+		}
+		cond_resched();
+	}
+
+	atomic_set(&ctx.stop, 1);
+	kthread_stop(worker);
+	mmput(ctx.mm);
+
+	if (!ret && copy_to_user((void __user *)arg, &args, sizeof(args)))
+		ret = -EFAULT;
+out:
+	kvfree(pin_pages);
+	return ret;
+}
+
 static long pin_longterm_test_ioctl(struct file *filep, unsigned int cmd,
 				    unsigned long arg)
 {
@@ -329,6 +497,9 @@ static long pin_longterm_test_ioctl(struct file *filep, unsigned int cmd,
 		break;
 	case PIN_LONGTERM_TEST_READ:
 		ret = pin_longterm_test_read(arg);
+		break;
+	case PIN_LONGTERM_TEST_RACE:
+		ret = pin_longterm_race_test(arg);
 		break;
 	}
 
@@ -353,6 +524,7 @@ static long gup_test_ioctl(struct file *filep, unsigned int cmd,
 	case PIN_LONGTERM_TEST_START:
 	case PIN_LONGTERM_TEST_STOP:
 	case PIN_LONGTERM_TEST_READ:
+	case PIN_LONGTERM_TEST_RACE:
 		return pin_longterm_test_ioctl(filep, cmd, arg);
 	default:
 		return -EINVAL;
