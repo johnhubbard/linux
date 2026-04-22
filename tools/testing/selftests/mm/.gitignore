@@ -48,6 +48,7 @@ local_config.mk
 ksm_functional_tests
 mdwe_test
 gup_longterm
+gup_longterm_race
 mkdirty
 va_high_addr_switch
 hugetlb_fault_after_madv
