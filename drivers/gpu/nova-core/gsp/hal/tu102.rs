@@ -356,5 +356,4 @@ impl GspHal for Tu102 {
     }
 }
 
-const TU102: Tu102 = Tu102;
-pub(super) const TU102_HAL: &dyn GspHal = &TU102;
+pub(super) const TU102_HAL: &dyn GspHal = &Tu102;

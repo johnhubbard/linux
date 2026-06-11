@@ -19,5 +19,4 @@ impl FspHal for Gb100 {
     }
 }
 
-const GB100: Gb100 = Gb100;
-pub(super) const GB100_HAL: &dyn FspHal = &GB100;
+pub(super) const GB100_HAL: &dyn FspHal = &Gb100;

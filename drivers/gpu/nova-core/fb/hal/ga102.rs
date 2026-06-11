@@ -50,5 +50,4 @@ impl FbHal for Ga102 {
     }
 }
 
-const GA102: Ga102 = Ga102;
-pub(super) const GA102_HAL: &dyn FbHal = &GA102;
+pub(super) const GA102_HAL: &dyn FbHal = &Ga102;

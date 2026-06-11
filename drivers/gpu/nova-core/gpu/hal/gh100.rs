@@ -30,5 +30,4 @@ impl GpuHal for Gh100 {
     }
 }
 
-const GH100: Gh100 = Gh100;
-pub(super) const GH100_HAL: &dyn GpuHal = &GH100;
+pub(super) const GH100_HAL: &dyn GpuHal = &Gh100;

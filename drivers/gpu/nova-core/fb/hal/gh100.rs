@@ -46,5 +46,4 @@ impl FbHal for Gh100 {
     }
 }
 
-const GH100: Gh100 = Gh100;
-pub(super) const GH100_HAL: &dyn FbHal = &GH100;
+pub(super) const GH100_HAL: &dyn FbHal = &Gh100;

@@ -23,5 +23,4 @@ impl FspHal for Gb202 {
     }
 }
 
-const GB202: Gb202 = Gb202;
-pub(super) const GB202_HAL: &dyn FspHal = &GB202;
+pub(super) const GB202_HAL: &dyn FspHal = &Gb202;

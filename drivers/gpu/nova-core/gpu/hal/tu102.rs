@@ -96,5 +96,4 @@ impl GpuHal for Tu102 {
     }
 }
 
-const TU102: Tu102 = Tu102;
-pub(super) const TU102_HAL: &dyn GpuHal = &TU102;
+pub(super) const TU102_HAL: &dyn GpuHal = &Tu102;
