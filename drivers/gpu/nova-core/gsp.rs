@@ -139,14 +139,51 @@ struct LogBuffers {
     logrm: LogBuffer,
 }
 
+kernel::sync::global_lock! {
+    // GSP-RM log scopes kept for post-mortem debugging when `keep_gsp_logs` is
+    // set. These outlive the device they came from (across probe failure or
+    // unbind), but are drained at module unload by `drain_kept_logs` so the
+    // debugfs files are removed while this module's file ops are still mapped.
+    //
+    // SAFETY: Initialized by `init_kept_logs` in module init, before first use.
+    unsafe(uninit) static KEPT_GSP_LOGS: Mutex<KVec<Pin<KBox<debugfs::Scope<LogBuffers>>>>> =
+        KVec::new();
+}
+
+/// Initializes the kept-logs store.
+///
+/// # Safety
+///
+/// Must be called exactly once, from module init, before any probe() can run.
+pub(crate) unsafe fn init_kept_logs() {
+    // SAFETY: Per this function's safety requirements.
+    unsafe { KEPT_GSP_LOGS.init() };
+}
+
+/// Drops all kept GSP-RM log scopes, removing their debugfs entries.
+///
+/// Called at module unload, after the driver is unregistered (so no probe() can
+/// be running) and before the debugfs root is removed, while this module's file
+/// ops are still mapped.
+pub(crate) fn drain_kept_logs() {
+    let kept = core::mem::replace(&mut *KEPT_GSP_LOGS.lock(), KVec::new());
+    drop(kept);
+}
+
 /// GSP runtime data.
 #[pin_data]
 pub(crate) struct Gsp {
     /// Libos arguments.
     pub(crate) libos: Coherent<[LibosMemoryRegionInitArgument]>,
-    /// Log buffers, optionally exposed via debugfs.
-    #[pin]
-    logs: debugfs::Scope<LogBuffers>,
+    /// GSP-RM log buffers exposed via debugfs.
+    ///
+    /// Heap-boxed so ownership can be handed off. When the `keep_gsp_logs`
+    /// module parameter is set, the scope is moved into the module-level
+    /// [`KEPT_GSP_LOGS`] store at creation and this is `None`; the debugfs
+    /// entries and DMA buffers then survive device teardown and live until the
+    /// module unloads. When the parameter is off this is `Some` and the scope
+    /// is freed normally on teardown.
+    _logs: Option<Pin<KBox<debugfs::Scope<LogBuffers>>>>,
     /// Command queue.
     #[pin]
     pub(crate) cmdq: Cmdq,
@@ -184,7 +221,7 @@ impl Gsp {
 
                     libos.into()
                 },
-                logs <- {
+                _logs: {
                     let log_buffers = LogBuffers {
                         loginit,
                         logintr,
@@ -201,11 +238,30 @@ impl Gsp {
                     let log_parent: &debugfs::Dir = unsafe { crate::DEBUGFS_ROOT.as_ref() }
                         .expect("DEBUGFS_ROOT not initialized");
 
-                    log_parent.scope(log_buffers, dev.name(), |logs, dir| {
-                        dir.read_binary_file(c"loginit", &logs.loginit.0);
-                        dir.read_binary_file(c"logintr", &logs.logintr.0);
-                        dir.read_binary_file(c"logrm", &logs.logrm.0);
-                    })
+                    // Heap-box so ownership can be handed to the module-level
+                    // store when the parameter requests it.
+                    let scope = KBox::pin_init(
+                        log_parent.scope(log_buffers, dev.name(), |logs, dir| {
+                            dir.read_binary_file(c"loginit", &logs.loginit.0);
+                            dir.read_binary_file(c"logintr", &logs.logintr.0);
+                            dir.read_binary_file(c"logrm", &logs.logrm.0);
+                        }),
+                        GFP_KERNEL,
+                    )?;
+
+                    if *crate::module_parameters::keep_gsp_logs.value() != 0 {
+                        // Hand the scope to the module-level store so its debugfs
+                        // entries and DMA buffers survive device teardown (probe
+                        // failure or unbind) for post-mortem debugging. The store
+                        // is drained at module unload, which removes the entries
+                        // while this module's file ops are still mapped. On OOM
+                        // the scope just drops here (removing its entries) and
+                        // probe proceeds.
+                        let _ = KEPT_GSP_LOGS.lock().push(scope, GFP_KERNEL);
+                        None
+                    } else {
+                        Some(scope)
+                    }
                 },
             }))
         })

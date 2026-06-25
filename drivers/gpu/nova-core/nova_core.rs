@@ -43,12 +43,26 @@ impl Drop for DebugfsRootGuard {
     }
 }
 
+/// Guard that drops any kept GSP-RM log scopes when the module unloads.
+struct KeptLogsGuard;
+
+impl Drop for KeptLogsGuard {
+    fn drop(&mut self) {
+        // Dropped after `_driver` (no probe() can be running) and before
+        // `_debugfs_guard` removes the root, while this module's file ops are
+        // still mapped, so the kept debugfs entries can be removed safely.
+        gsp::drain_kept_logs();
+    }
+}
+
 #[pin_data]
 struct NovaCoreModule {
-    // Fields are dropped in declaration order, so `_driver` is dropped first,
-    // then `_debugfs_guard` clears `DEBUGFS_ROOT`.
+    // Fields are dropped in declaration order: `_driver` first (unbinds all
+    // devices), then `_kept_logs_guard` removes any kept log entries, then
+    // `_debugfs_guard` clears `DEBUGFS_ROOT`.
     #[pin]
     _driver: Registration<pci::Adapter<driver::NovaCoreDriver>>,
+    _kept_logs_guard: KeptLogsGuard,
     _debugfs_guard: DebugfsRootGuard,
 }
 
@@ -60,8 +74,14 @@ impl InPlaceModule for NovaCoreModule {
         // cannot be any concurrent access to `DEBUGFS_ROOT`.
         unsafe { DEBUGFS_ROOT = Some(dir) };
 
+        // SAFETY: Module init runs exactly once, and this is reached before
+        // driver registration, so this is the only call and it happens before
+        // any probe() can run (i.e. before the lock's first use).
+        unsafe { gsp::init_kept_logs() };
+
         try_pin_init!(Self {
             _driver <- Registration::new(MODULE_NAME, module),
+            _kept_logs_guard: KeptLogsGuard,
             _debugfs_guard: DebugfsRootGuard,
         })
     }
@@ -74,6 +94,12 @@ module! {
     description: "Nova Core GPU driver",
     license: "GPL v2",
     firmware: [],
+    params: {
+        keep_gsp_logs: u8 {
+            default: 0,
+            description: "If non-zero, keep the GSP-RM log debugfs entries and their DMA buffers alive until the module is unloaded, for post-mortem debugging of probe or unload failures. This leaks those buffers. Default 0 (disabled).",
+        },
+    },
 }
 
 kernel::module_firmware!(firmware::ModInfoBuilder);
