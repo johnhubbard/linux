@@ -8,5 +8,19 @@
 //!
 //! See `Documentation/gpu/nova/core/interrupts.rst`.
 
+mod hal;
 mod interrupt_tree;
 mod regs;
+
+/// The message-signaled interrupt type a vector allocation obtained.
+///
+/// nova-core allocates MSI-X or MSI and nothing else, so the level-triggered INTx that
+/// [`kernel::pci::IrqType`] also names has no variant here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MsiType {
+    /// One message, which every subtree raises.
+    Msi,
+
+    /// One table entry per subtree.
+    MsiX,
+}
