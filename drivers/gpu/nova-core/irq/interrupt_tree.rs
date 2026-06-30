@@ -16,14 +16,16 @@ use kernel::{
         Io, //
     },
     num::Bounded,
+    pci::IrqType,
     prelude::*,
 };
 
 use crate::{
     driver::Bar0,
-    gpu::{
-        Architecture,
-        Chipset, //
+    gpu::Chipset,
+    irq::hal::{
+        cpu_interrupt_hal,
+        PciIrqRearmMethod, //
     },
     regs::{
         NV_VIRTUAL_FUNCTION_PRIV_CPU_INTR_LEAF as CPU_INTR_LEAF,
@@ -82,31 +84,43 @@ mod private {
 pub(super) struct Tree {
     /// Number of implemented leaves in this tree, either 8 or 16.
     num_leaves: usize,
-    /// Mask of subtree bits the architecture implements.
-    subtree_mask: u32,
+    /// The subtrees this tree enables and services.
+    serviced_subtrees: u32,
+    /// Method that rearms PCI interrupt delivery, or `None` if the interrupt type needs no rearm
+    /// write.
+    rearm_method: Option<PciIrqRearmMethod>,
 }
 
 impl Tree {
-    /// Creates a `Tree` sized for `chipset`.
-    pub(super) fn new(chipset: Chipset) -> Self {
-        let num_leaves = match chipset.arch() {
-            Architecture::Turing | Architecture::Ampere | Architecture::Ada => 8,
-            Architecture::Hopper | Architecture::BlackwellGB10x | Architecture::BlackwellGB20x => {
-                16
-            }
-        };
-
+    /// Creates a `Tree` for `chipset` covering `serviced_subtrees`, with the rearm method that
+    /// `irq_type` requires.
+    ///
+    /// Each serviced subtree must have an allocated PCI vector and a registered handler, which
+    /// [`super::alloc_vectors`] sizes the allocation for. Bits outside the subtrees the
+    /// architecture implements are dropped.
+    pub(super) fn new(chipset: Chipset, irq_type: IrqType, serviced_subtrees: u32) -> Self {
+        let hal = cpu_interrupt_hal(chipset);
         Self {
-            num_leaves,
-            // Each subtree covers two leaves, so one bit per pair of leaves.
-            subtree_mask: (1u32 << (num_leaves / 2)) - 1,
+            num_leaves: hal.num_leaves(),
+            serviced_subtrees: serviced_subtrees & hal.implemented_subtrees(),
+            rearm_method: hal.pci_irq_rearm_method(irq_type),
+        }
+    }
+
+    /// Rearms PCI interrupt delivery to the CPU after servicing `subtree`, the `TOP` bit of the
+    /// one subtree the calling handler serves.
+    ///
+    /// A handler must call this before it returns, or it receives no further interrupts.
+    pub(super) fn rearm_pci_irq(&self, bar: Bar0<'_>, subtree: u32) {
+        if let Some(method) = self.rearm_method {
+            method.rearm(bar, self.serviced_subtrees, subtree);
         }
     }
 
     /// Returns a [`Top`] handle for this tree.
     pub(super) fn top(&self) -> Top {
         Top {
-            subtree_mask: self.subtree_mask,
+            serviced_subtrees: self.serviced_subtrees,
         }
     }
 
@@ -131,9 +145,9 @@ impl Tree {
 
     /// Clears every pending bit in every implemented leaf.
     ///
-    /// The walk runs with every implemented subtree disabled at `TOP`, and every implemented
-    /// subtree is enabled on return, whatever its state on entry. The leaves cleared and the
-    /// `TOP_EN` writes both reach subtrees the driver does not service.
+    /// Disables this tree's serviced subtrees at `TOP` across the walk, then enables them,
+    /// whatever their state on entry. The leaves cleared reach subtrees the driver does not
+    /// service, and the `TOP_EN` writes do not.
     ///
     /// Call `drain()` only during probe. It must not run concurrently with an interrupt handler.
     pub(super) fn drain(&self, bar: Bar0<'_>) {
@@ -152,19 +166,21 @@ impl Tree {
 }
 
 /// Top-level view of the interrupt tree, enabling and disabling whole subtrees.
+///
+/// Both writes cover the serviced subtrees alone, leaving the rest of the tree as it was.
 pub(super) struct Top {
-    subtree_mask: u32,
+    serviced_subtrees: u32,
 }
 
 impl Top {
-    /// Enables interrupt delivery for every implemented subtree (`TOP_EN_SET`).
+    /// Enables this tree's serviced subtrees (`TOP_EN_SET`).
     pub(super) fn enable(self, bar: Bar0<'_>) {
-        bar.write(CPU_INTR_TOP_EN_SET, self.subtree_mask.into());
+        bar.write(CPU_INTR_TOP_EN_SET, self.serviced_subtrees.into());
     }
 
-    /// Disables interrupt delivery for every implemented subtree (`TOP_EN_CLEAR`).
+    /// Disables this tree's serviced subtrees (`TOP_EN_CLEAR`).
     pub(super) fn disable(self, bar: Bar0<'_>) {
-        bar.write(CPU_INTR_TOP_EN_CLEAR, self.subtree_mask.into());
+        bar.write(CPU_INTR_TOP_EN_CLEAR, self.serviced_subtrees.into());
     }
 }
 

@@ -29,7 +29,6 @@ use crate::{
         Gsp,
         GspBootContext, //
     },
-    irq,
     regs,
     vgpu::VgpuManager, //
 };
@@ -293,8 +292,6 @@ pub(crate) struct Gpu<'gpu> {
     /// Must be kept declared *after* `gsp_resources`, as the latter's `PinnedDrop` implementation
     /// requires the sysmem flush page to be in place.
     sysmem_flush: SysmemFlush<'gpu>,
-    /// PCI interrupt vector allocation. Dropping it frees the vectors.
-    _vectors: pci::IrqVectorRegistration<'gpu>,
 }
 
 #[pinned_drop]
@@ -388,8 +385,6 @@ impl<'gpu> Gpu<'gpu> {
                     vgpu,
                 })?,
             }),
-
-            _vectors: irq::alloc_vector(pdev)?,
 
             gsp_static_info: {
                 // Obtain and display basic GPU information.
