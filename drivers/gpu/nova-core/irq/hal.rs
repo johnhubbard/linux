@@ -50,7 +50,6 @@ impl PciIrqRearmMethod {
     /// `serviced` holds the `TOP` bit of every subtree the driver services, and `subtree` holds
     /// the bit of the one subtree the calling handler serves. Each method uses whichever of the
     /// two its interrupt type delivers on, so both are required.
-    #[expect(dead_code)]
     pub(super) fn rearm(self, bar: Bar0<'_>, serviced: u32, subtree: u32) {
         let subtrees = match self {
             // The written value is ignored, so any write rearms delivery.
@@ -98,7 +97,6 @@ pub(super) trait CpuInterruptHal {
     ///
     /// `None` means that `irq_type` needs no rearm write. That is the case for `INTx`, which is
     /// level-triggered, and which nova-core does not allocate.
-    #[expect(dead_code)]
     fn pci_irq_rearm_method(&self, irq_type: IrqType) -> Option<PciIrqRearmMethod>;
 }
 

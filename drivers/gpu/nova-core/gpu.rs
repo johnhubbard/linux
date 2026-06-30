@@ -29,7 +29,6 @@ use crate::{
         Gsp,
         GspBootContext, //
     },
-    irq,
     regs,
     vgpu::VgpuManager, //
 };
@@ -386,11 +385,6 @@ impl<'gpu> Gpu<'gpu> {
                     vgpu,
                 })?,
             }),
-
-            // Allocate a PCI interrupt vector.
-            _: {
-                let _irq_vector = irq::alloc_vector(pdev)?;
-            },
 
             gsp_static_info: {
                 // Obtain and display basic GPU information.
