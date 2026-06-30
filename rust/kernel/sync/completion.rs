@@ -6,12 +6,21 @@
 //!
 //! C header: [`include/linux/completion.h`](srctree/include/linux/completion.h)
 
-use crate::{bindings, prelude::*, types::Opaque};
+use crate::{
+    bindings,
+    prelude::*,
+    time::Jiffies,
+    types::Opaque, //
+};
 
 /// Synchronization primitive to signal when a certain task has been completed.
 ///
 /// The [`Completion`] synchronization primitive signals when a certain task has been completed by
 /// waking up other tasks that have been queued up to wait for the [`Completion`] to be completed.
+///
+/// # Invariants
+///
+/// `inner` always holds an initialized `struct completion`.
 ///
 /// # Examples
 ///
@@ -96,7 +105,8 @@ impl Completion {
     /// completion is permanently done, i.e. signals all current and future waiters.
     #[inline]
     pub fn complete_all(&self) {
-        // SAFETY: `self.as_raw()` is a pointer to a valid `struct completion`.
+        // SAFETY: By the type invariant, `self.as_raw()` is a pointer to an initialized
+        // `struct completion`.
         unsafe { bindings::complete_all(self.as_raw()) };
     }
 
@@ -108,7 +118,25 @@ impl Completion {
     /// See also [`Completion::complete_all`].
     #[inline]
     pub fn wait_for_completion(&self) {
-        // SAFETY: `self.as_raw()` is a pointer to a valid `struct completion`.
+        // SAFETY: By the type invariant, `self.as_raw()` is a pointer to an initialized
+        // `struct completion`.
         unsafe { bindings::wait_for_completion(self.as_raw()) };
+    }
+
+    /// Wait for completion of a task, with a timeout.
+    ///
+    /// This method waits for the completion of a task, or until `timeout` elapses. It is not
+    /// interruptible. Returns the number of jiffies left when the task completed, or [`None`] if
+    /// `timeout` elapsed first.
+    ///
+    /// See also [`Completion::complete_all`].
+    #[inline]
+    pub fn wait_for_completion_timeout(&self, timeout: Jiffies) -> Option<Jiffies> {
+        // SAFETY: By the type invariant, `self.as_raw()` is a pointer to an initialized
+        // `struct completion`.
+        match unsafe { bindings::wait_for_completion_timeout(self.as_raw(), timeout) } {
+            0 => None,
+            remaining => Some(remaining),
+        }
     }
 }
