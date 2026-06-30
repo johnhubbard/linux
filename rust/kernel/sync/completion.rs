@@ -6,7 +6,15 @@
 //!
 //! C header: [`include/linux/completion.h`](srctree/include/linux/completion.h)
 
-use crate::{bindings, prelude::*, types::Opaque};
+use crate::{
+    bindings,
+    prelude::*,
+    time::{
+        Delta,
+        Jiffy, //
+    },
+    types::Opaque, //
+};
 
 /// Synchronization primitive to signal when a certain task has been completed.
 ///
@@ -110,5 +118,27 @@ impl Completion {
     pub fn wait_for_completion(&self) {
         // SAFETY: `self.as_raw()` is a pointer to a valid `struct completion`.
         unsafe { bindings::wait_for_completion(self.as_raw()) };
+    }
+
+    /// Waits for the completion of a task, or until `timeout` elapses.
+    ///
+    /// This method is not interruptible. It clamps a negative `timeout` to zero.
+    ///
+    /// Returns the time remaining, at least one jiffy, if the task completes before `timeout`
+    /// elapses, and [`None`] otherwise.
+    ///
+    /// See also [`Completion::complete_all`].
+    #[inline]
+    pub fn wait_for_completion_timeout(&self, timeout: Delta<Jiffy>) -> Option<Delta<Jiffy>> {
+        // CAST: the value is non-negative after `max`, so the cast to unsigned is lossless.
+        let timeout = timeout.as_jiffies().max(0) as c_ulong;
+
+        // SAFETY: `self.as_raw()` is a pointer to a valid `struct completion`.
+        match unsafe { bindings::wait_for_completion_timeout(self.as_raw(), timeout) } {
+            0 => None,
+            // CAST: `remaining` is at most `timeout`, or `1` when `timeout` is zero, so it fits
+            // an `isize`.
+            remaining => Some(Delta::from_jiffies(remaining as isize)),
+        }
     }
 }
