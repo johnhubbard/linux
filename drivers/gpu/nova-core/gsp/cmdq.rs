@@ -556,8 +556,8 @@ impl Cmdq {
 
     /// Sends `command` to the GSP and waits for the reply.
     ///
-    /// Messages with non-matching function codes are silently consumed until the expected reply
-    /// arrives.
+    /// A message read while waiting that is not the reply is logged if it is an error record, and
+    /// ignored otherwise.
     ///
     /// The queue is locked for the entire send+receive cycle to ensure that no other command can
     /// be interleaved.
@@ -814,8 +814,10 @@ impl CmdqInner {
 
     /// Receive a message from the GSP.
     ///
-    /// The expected message type is specified using the `M` generic parameter. If the pending
-    /// message has a different function code, `ERANGE` is returned and the message is consumed.
+    /// The expected message type is specified using the `M` generic parameter. A message whose
+    /// function code matches is decoded and returned. Any other message, whether its function code
+    /// is a different one or is unrecognized, goes to [`Self::classify_event`] and `ERANGE` is
+    /// returned.
     ///
     /// The read pointer is always advanced past the message, regardless of whether it matched.
     ///
@@ -824,8 +826,7 @@ impl CmdqInner {
     /// - `ETIMEDOUT` if `timeout` has elapsed before any message becomes available.
     /// - `EIO` if there was some inconsistency (e.g. message shorter than advertised) on the
     ///   message queue.
-    /// - `EINVAL` if the function code of the message was not recognized.
-    /// - `ERANGE` if the message had a recognized but non-matching function code.
+    /// - `ERANGE` if the message was not the awaited reply.
     ///
     /// Error codes returned by [`MessageFromGsp::read`] are propagated as-is.
     fn receive_msg<M: MessageFromGsp>(&mut self, timeout: Delta) -> Result<M>
@@ -834,11 +835,12 @@ impl CmdqInner {
         Error: From<M::InitError>,
     {
         let message = self.wait_for_msg(timeout)?;
-        let function = message.header.function().map_err(|_| EINVAL)?;
+        let function = message.header.function();
+        let seq = message.header.sequence();
 
-        // Extract the message. Store the result as we want to advance the read pointer even in
-        // case of failure.
-        let result = if function == M::FUNCTION {
+        // Bind the result rather than returning early. The read pointer must advance past this
+        // message on every path.
+        let result = if matches!(function, Ok(f) if f == M::FUNCTION) {
             let (cmd, contents_1) = M::Message::from_bytes_prefix(message.contents.0).ok_or(EIO)?;
             let mut sbuffer = SBufferIter::new_reader([contents_1, message.contents.1]);
 
@@ -849,11 +851,13 @@ impl CmdqInner {
                         dev_warn!(
                             &self.dev,
                             "GSP message {:?} has unprocessed data\n",
-                            function
+                            M::FUNCTION
                         );
                     }
                 })
         } else {
+            self.classify_event(function, seq);
+
             Err(ERANGE)
         };
 
@@ -863,5 +867,37 @@ impl CmdqInner {
         )?);
 
         result
+    }
+
+    /// Logs a GSP message that is not the reply a caller is waiting for, according to what its
+    /// function code reports.
+    ///
+    /// GSP-reported errors are logged at error level and unrecognized function codes at warning
+    /// level. Every other known function code is consumed without a log line, because the RPC
+    /// receive trace in [`Self::wait_for_msg`] already records its arrival.
+    fn classify_event(&self, function: Result<MsgFunction, u32>, seq: u32) {
+        match function {
+            Ok(MsgFunction::OsErrorLog) => {
+                dev_err!(&self.dev, "GSP reported an OS error (seq {})\n", seq);
+            }
+            Ok(MsgFunction::RcTriggered) => {
+                dev_err!(
+                    &self.dev,
+                    "GSP triggered robust-channel recovery (seq {})\n",
+                    seq
+                );
+            }
+            // GSP logs, libos prints, NoCat assertion records, and the other known event codes.
+            // None of them requires action.
+            Ok(_) => {}
+            Err(raw) => {
+                dev_warn!(
+                    &self.dev,
+                    "unknown GSP message function {:#x} (seq {})\n",
+                    raw,
+                    seq
+                );
+            }
+        }
     }
 }
