@@ -146,3 +146,46 @@ pub(super) fn falcon_hal<E: FalconEngine + 'static>(
 
     Ok(hal)
 }
+
+#[kunit_tests(nova_core_falcon_hal)]
+mod tests {
+    use super::*;
+
+    /// Only Turing falcons lack the interrupt retrigger register. GA100 has it even though
+    /// [`falcon_hal`] gives GA100 the Turing HAL, which is why the gate is keyed on the
+    /// architecture instead.
+    #[test]
+    fn intr_retrigger_gate_per_arch() {
+        assert!(!has_intr_retrigger(Chipset::TU102));
+
+        for chipset in [
+            Chipset::GA100,
+            Chipset::GA102,
+            Chipset::AD102,
+            Chipset::GH100,
+            Chipset::GB100,
+            Chipset::GB202,
+        ] {
+            assert!(has_intr_retrigger(chipset));
+        }
+    }
+
+    /// GA102 moved the RISC-V interrupt routing registers. GA100 kept the Turing offsets even
+    /// though it is Ampere, so the two gates in this module do not agree on GA100.
+    #[test]
+    fn riscv_routing_offsets_split_at_ga102() {
+        for chipset in [Chipset::TU102, Chipset::TU116, Chipset::GA100] {
+            assert!(has_turing_riscv_routing(chipset));
+        }
+
+        for chipset in [
+            Chipset::GA102,
+            Chipset::AD102,
+            Chipset::GH100,
+            Chipset::GB100,
+            Chipset::GB202,
+        ] {
+            assert!(!has_turing_riscv_routing(chipset));
+        }
+    }
+}
