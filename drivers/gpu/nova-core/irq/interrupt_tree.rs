@@ -116,7 +116,10 @@ impl LeafMask {
     }
 
     /// Returns the mask as the value the leaf registers take.
-    #[cfg_attr(not(CONFIG_NOVA_CORE_IRQ_SELFTEST), expect(dead_code))]
+    #[cfg_attr(
+        not(any(CONFIG_NOVA_CORE_IRQ_SELFTEST, CONFIG_KUNIT = "y")),
+        expect(dead_code)
+    )]
     pub(super) const fn into_raw(self) -> u32 {
         self.0
     }
@@ -515,5 +518,135 @@ pub(super) struct TopEnableGuard<'a> {
 impl Drop for TopEnableGuard<'_> {
     fn drop(&mut self) {
         clear_top_enables(self.bar, self.serviced);
+    }
+}
+
+#[kunit_tests(nova_core_gin_tree)]
+mod tests {
+    use super::*;
+
+    /// A leaf index is a `Bounded<usize, 4>`, so it accepts 0..=15 and rejects 16.
+    #[test]
+    fn leaf_index_bounds() {
+        assert!(LeafIndex::try_new(0).is_some());
+        assert!(LeafIndex::try_new(15).is_some());
+        assert!(LeafIndex::try_new(16).is_none());
+    }
+
+    /// A leaf count yields one subtree per pair of leaves, and 32 vectors per leaf.
+    #[test]
+    fn leaf_count_derives_subtrees_and_vectors() {
+        assert_eq!(LeafCount::Eight.subtree_count(), 4);
+        assert_eq!(
+            Bounded::<u32, 32>::from(LeafCount::Eight.subtree_set()).get(),
+            0x0f
+        );
+        assert_eq!(LeafCount::Eight.vector_count(), 256);
+
+        assert_eq!(LeafCount::Sixteen.subtree_count(), 8);
+        assert_eq!(
+            Bounded::<u32, 32>::from(LeafCount::Sixteen.subtree_set()).get(),
+            0xff
+        );
+        assert_eq!(LeafCount::Sixteen.vector_count(), 512);
+    }
+
+    /// A tree enumerates every leaf it implements, in order, and no more.
+    #[test]
+    fn implemented_leaves_covers_the_tree() {
+        for (count, expected) in [(LeafCount::Eight, 8usize), (LeafCount::Sixteen, 16)] {
+            let mut seen = 0;
+
+            for (index, leaf) in implemented_leaves(count).enumerate() {
+                assert_eq!(leaf.get(), index);
+                seen += 1;
+            }
+
+            assert_eq!(seen, expected);
+        }
+    }
+
+    /// A vector maps to its leaf, its bit within that leaf, and its subtree. The doorbell (129)
+    /// and GSP (155) vectors share a subtree, so one allocation and one enable serve both.
+    #[test]
+    fn vector_maps_to_leaf_bit_and_subtree() {
+        let doorbell = GinVector::new::<129>();
+        let gsp = GinVector::new::<155>();
+
+        assert_eq!(doorbell.leaf_index().get(), 4);
+        assert_eq!(doorbell.leaf_mask().into_raw(), 1 << 1);
+        assert_eq!(doorbell.subtree().index(), 2);
+
+        assert_eq!(gsp.leaf_index().get(), 4);
+        assert_eq!(gsp.leaf_mask().into_raw(), 1 << 27);
+        assert_eq!(gsp.subtree().index(), 2);
+
+        assert_eq!(doorbell.subtree(), gsp.subtree());
+    }
+
+    /// Both fixed vectors lie within the 8-leaf tree, so every supported part carries them.
+    #[test]
+    fn fixed_vectors_fit_the_narrowest_tree() {
+        assert!(GinVector::new::<129>().validate(LeafCount::Eight).is_ok());
+        assert!(GinVector::new::<155>().validate(LeafCount::Eight).is_ok());
+
+        // The first vector beyond an 8-leaf tree.
+        assert!(GinVector::new::<256>().validate(LeafCount::Eight).is_err());
+        assert!(GinVector::new::<256>().validate(LeafCount::Sixteen).is_ok());
+    }
+
+    /// A subtree set reports membership, intersection, and how far it extends from subtree 0.
+    #[test]
+    fn subtree_set_operations() {
+        let gsp = GinVector::new::<155>().subtree();
+
+        assert!(LeafCount::Eight.subtree_set().contains(gsp));
+        assert!(!LeafCount::Eight.subtree_set().is_empty());
+
+        // Subtree 2 is the highest the GSP needs, so an MSI-X request covers entries 0 through 2.
+        assert_eq!(SubtreeSet::from(gsp).span(), 3);
+
+        // Hopper implements every subtree an 8-leaf tree does.
+        assert_eq!(
+            LeafCount::Sixteen
+                .subtree_set()
+                .intersection(LeafCount::Eight.subtree_set()),
+            LeafCount::Eight.subtree_set()
+        );
+    }
+
+    /// Iterating a subtree set yields each of its subtrees once, lowest index first, and yields
+    /// nothing for an empty set.
+    #[test]
+    fn subtree_set_iterates_its_members() {
+        assert!(LeafCount::Eight
+            .subtree_set()
+            .iter()
+            .map(Subtree::index)
+            .eq([0u32, 1, 2, 3]));
+
+        let gsp = SubtreeSet::from(GinVector::new::<155>().subtree());
+        assert!(gsp.iter().map(Subtree::index).eq([2u32]));
+
+        let empty = SubtreeSet::from(Bounded::<u32, 32>::new::<0>());
+        assert_eq!(empty.iter().count(), 0);
+    }
+
+    /// Every supported chipset implements the subtree that carries the GSP notification.
+    #[test]
+    fn gsp_subtree_is_implemented_everywhere() {
+        for chipset in [
+            Chipset::TU102,
+            Chipset::GA102,
+            Chipset::AD102,
+            Chipset::GH100,
+            Chipset::GB100,
+            Chipset::GB202,
+        ] {
+            assert!(cpu_interrupt_hal(chipset)
+                .leaf_count()
+                .subtree_set()
+                .contains(crate::irq::gsp::GSP_SUBTREE));
+        }
     }
 }

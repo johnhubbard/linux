@@ -89,3 +89,67 @@ pub(super) fn cpu_interrupt_hal(chipset: Chipset) -> &'static dyn CpuInterruptHa
         }
     }
 }
+
+#[kunit_tests(nova_core_gin_hal)]
+mod tests {
+    use super::*;
+
+    use crate::gpu::Chipset;
+
+    /// Pre-Hopper parts have an 8-leaf tree.
+    #[test]
+    fn pre_hopper_tree_size() {
+        for chipset in [Chipset::TU102, Chipset::GA102, Chipset::AD102] {
+            assert_eq!(cpu_interrupt_hal(chipset).leaf_count(), LeafCount::Eight);
+        }
+    }
+
+    /// Hopper and later implement a 16-leaf tree.
+    #[test]
+    fn hopper_plus_tree_size() {
+        for chipset in [Chipset::GH100, Chipset::GB100, Chipset::GB202] {
+            assert_eq!(cpu_interrupt_hal(chipset).leaf_count(), LeafCount::Sixteen);
+        }
+    }
+
+    /// Only pre-Hopper MSI rearms through the configuration-space mirror. MSI on Hopper and later
+    /// cycles the `TOP` enables of every serviced subtree.
+    #[test]
+    fn msi_rearm_method_per_arch() {
+        for chipset in [Chipset::TU102, Chipset::GA102, Chipset::AD102] {
+            let hal = cpu_interrupt_hal(chipset);
+            assert_eq!(
+                hal.pci_irq_rearm_method(MsiType::Msi),
+                PciIrqRearmMethod::ConfigMirrorEoi
+            );
+        }
+
+        for chipset in [Chipset::GH100, Chipset::GB100, Chipset::GB202] {
+            let hal = cpu_interrupt_hal(chipset);
+            assert_eq!(
+                hal.pci_irq_rearm_method(MsiType::Msi),
+                PciIrqRearmMethod::TopEnableCycleServiced
+            );
+        }
+    }
+
+    /// MSI-X gives each subtree its own table entry, so on every architecture its rearm cycles
+    /// only the subtree the handler serves.
+    #[test]
+    fn msix_rearms_one_subtree_on_every_arch() {
+        for chipset in [
+            Chipset::TU102,
+            Chipset::GA102,
+            Chipset::AD102,
+            Chipset::GH100,
+            Chipset::GB100,
+            Chipset::GB202,
+        ] {
+            let hal = cpu_interrupt_hal(chipset);
+            assert_eq!(
+                hal.pci_irq_rearm_method(MsiType::MsiX),
+                PciIrqRearmMethod::TopEnableCycleSubtree
+            );
+        }
+    }
+}
