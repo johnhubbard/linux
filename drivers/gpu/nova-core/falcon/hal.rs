@@ -171,3 +171,51 @@ pub(super) fn falcon_hal<E: FalconEngine + 'static>(
 
     Ok(hal)
 }
+
+#[kunit_tests(nova_core_falcon_hal)]
+mod tests {
+    use super::*;
+
+    /// Turing falcons have no retrigger register. GA100 and every later chipset have it.
+    #[test]
+    fn intr_retrigger_gate_per_arch() {
+        for chipset in [Chipset::TU102, Chipset::TU116] {
+            assert!(!falcon_intr_hal(chipset).has_intr_retrigger());
+        }
+
+        for chipset in [
+            Chipset::GA100,
+            Chipset::GA102,
+            Chipset::AD102,
+            Chipset::GH100,
+            Chipset::GB100,
+            Chipset::GB202,
+        ] {
+            assert!(falcon_intr_hal(chipset).has_intr_retrigger());
+        }
+    }
+
+    /// The RISC-V routing offsets change at GA102, so GA100 still uses the Turing ones.
+    #[test]
+    fn riscv_routing_offsets_split_at_ga102() {
+        for chipset in [Chipset::TU102, Chipset::TU116, Chipset::GA100] {
+            assert_eq!(
+                falcon_intr_hal(chipset).riscv_routing(),
+                RiscvRouting::Tu102
+            );
+        }
+
+        for chipset in [
+            Chipset::GA102,
+            Chipset::AD102,
+            Chipset::GH100,
+            Chipset::GB100,
+            Chipset::GB202,
+        ] {
+            assert_eq!(
+                falcon_intr_hal(chipset).riscv_routing(),
+                RiscvRouting::Ga102
+            );
+        }
+    }
+}
