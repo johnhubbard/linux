@@ -412,7 +412,6 @@ impl<'a> Tree<'a> {
     ///
     /// This clears enables outside the subtrees nova-core services, so it is a probe-time
     /// operation only.
-    #[expect(dead_code)]
     pub(super) fn disable_all_leaves(&self) {
         for index in 0..self.leaves.into_raw() {
             if let Some(leaf) = LeafIndex::try_new(index) {

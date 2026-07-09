@@ -28,13 +28,16 @@ use kernel::{
     time, //
 };
 
-use super::interrupt_tree::{
-    GinVector,
-    LeafEnableGuard,
-    LeafMask,
-    Subtree,
-    TopEnableGuard,
-    Tree, //
+use super::{
+    interrupt_tree::{
+        GinVector,
+        LeafEnableGuard,
+        LeafMask,
+        Subtree,
+        TopEnableGuard,
+        Tree, //
+    },
+    SubtreeVectors, //
 };
 use crate::{
     driver::Bar0,
@@ -49,8 +52,8 @@ const DOORBELL_VECTOR: GinVector = GinVector::new::<129>();
 
 /// Subtree carrying the doorbell vector, and the only subtree this test services.
 ///
-/// Derived from the vector so that changing `DOORBELL_VECTOR` moves the allocation, the subtree it
-/// enables, and the handler together.
+/// Derived from the vector so that changing `DOORBELL_VECTOR` moves the subtree it enables and the
+/// handler together.
 const DOORBELL_SUBTREE: Subtree = DOORBELL_VECTOR.subtree();
 
 /// Time allowed for each of the two deliveries to arrive.
@@ -153,17 +156,18 @@ impl<'a> SelftestResources<'a, '_> {
 ///
 /// # Errors
 ///
-/// `EIO` if the doorbell is already pending before the test, if the delivery count is not two, if
-/// the doorbell bit is still set once the source is stopped, or if either delivery found a pending
-/// bit other than the doorbell. `ETIMEDOUT` if either delivery does not arrive within the timeout.
+/// `EINVAL` if the doorbell's subtree is not one nova-core services. `EIO` if the doorbell is
+/// already pending before the test, if the delivery count is not two, if the doorbell bit is still
+/// set once the source is stopped, or if either delivery found a pending bit other than the
+/// doorbell. `ETIMEDOUT` if either delivery does not arrive within the timeout.
 pub(crate) fn run_selftest<'a>(
     pdev: &'a pci::Device<Bound>,
     bar: Bar0<'a>,
     chipset: Chipset,
+    vectors: &'a SubtreeVectors<'a>,
 ) -> Result {
-    // The allocated interrupt type decides how the handler rearms delivery, so the vectors are
-    // allocated before the tree is built.
-    let vectors = super::alloc_vectors(pdev, DOORBELL_SUBTREE.into())?;
+    // The interrupt type decides how the handler rearms delivery, so the tree takes it from
+    // probe's allocation.
     let request = vectors.request_for(DOORBELL_SUBTREE)?;
     let irq_type = vectors.irq_type();
     let tree = Tree::new(bar, chipset, irq_type, DOORBELL_SUBTREE.into());

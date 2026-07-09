@@ -18,7 +18,8 @@ use kernel::{
         Io, //
     },
     pci,
-    prelude::*, //
+    prelude::*,
+    sync::Arc, //
 };
 
 pub(crate) mod cmdq;
@@ -152,9 +153,8 @@ pub(crate) struct Gsp {
     /// Log buffers, optionally exposed via debugfs.
     #[pin]
     logs: debugfs::Scope<LogBuffers>,
-    /// Command queue.
-    #[pin]
-    pub(crate) cmdq: Cmdq,
+    /// Command queue, shared with the GSP event interrupt handler.
+    pub(crate) cmdq: Arc<Cmdq>,
     /// RM arguments.
     rmargs: Coherent<GspArgumentsPadded>,
 }
@@ -173,8 +173,8 @@ impl Gsp {
             // _kgspInitLibosLoggingStructures (allocates memory for buffers)
             // kgspSetupLibosInitArgs_IMPL (creates pLibosInitArgs[] array)
             Ok(try_pin_init!(Self {
-                cmdq <- Cmdq::new(dev),
-                rmargs: Coherent::init(dev, GFP_KERNEL, GspArgumentsPadded::new(&cmdq))?,
+                cmdq: Arc::pin_init(Cmdq::new(dev), GFP_KERNEL)?,
+                rmargs: Coherent::init(dev, GFP_KERNEL, GspArgumentsPadded::new(cmdq.as_ref()))?,
                 libos: {
                     let mut libos = CoherentBox::zeroed_slice(
                         dev,
@@ -219,6 +219,11 @@ impl Gsp {
     /// Query the GSP for the static GPU information.
     pub(crate) fn get_static_info(&self, bar: Bar0<'_>) -> Result<commands::GetGspStaticInfoReply> {
         self.cmdq.send_command(bar, commands::GetGspStaticInfo)
+    }
+
+    /// Returns a shared handle to the GSP command queue.
+    pub(crate) fn cmdq(&self) -> Arc<Cmdq> {
+        self.cmdq.clone()
     }
 }
 

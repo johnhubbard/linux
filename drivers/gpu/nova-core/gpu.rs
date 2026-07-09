@@ -10,7 +10,8 @@ use kernel::{
     num::Bounded,
     pci,
     prelude::*,
-    sizes::SizeConstants, //
+    sizes::SizeConstants,
+    sync::Arc, //
 };
 
 use crate::{
@@ -25,10 +26,12 @@ use crate::{
     fsp::Fsp,
     gsp::{
         self,
+        cmdq::Cmdq,
         commands::GetGspStaticInfoReply,
         Gsp,
         GspBootContext, //
     },
+    irq::SubtreeVectors,
     vgpu::VgpuManager, //
 };
 
@@ -323,11 +326,26 @@ impl PinnedDrop for GspResources<'_> {
 }
 
 impl<'gpu> Gpu<'gpu> {
+    /// Returns the chipset this GPU was identified as.
+    pub(crate) fn chipset(&self) -> Chipset {
+        self.spec.chipset
+    }
+
+    /// Returns a shared handle to the GSP command queue.
+    pub(crate) fn cmdq(&self) -> Arc<Cmdq> {
+        self.gsp_resources.gsp.cmdq()
+    }
+
     pub(crate) fn new(
         pdev: &'gpu pci::Device<device::Core<'_>>,
         bar: Bar0<'gpu>,
+        vectors: &'gpu SubtreeVectors<'gpu>,
     ) -> impl PinInit<Self, Error> + 'gpu {
         let dev = pdev.as_ref();
+
+        // `vectors` exists for the interrupt self-test below, which this configuration omits.
+        #[cfg(not(CONFIG_NOVA_CORE_IRQ_SELFTEST))]
+        let _ = vectors;
 
         try_pin_init!(Self {
             spec: Spec::new(dev, bar).inspect(|spec| {
@@ -352,7 +370,7 @@ impl<'gpu> Gpu<'gpu> {
             // never observes or clears GSP or PRIV_RING interrupts.
             _: {
                 #[cfg(CONFIG_NOVA_CORE_IRQ_SELFTEST)]
-                crate::irq::doorbell_test::run_selftest(pdev, bar, spec.chipset)?;
+                crate::irq::doorbell_test::run_selftest(pdev, bar, spec.chipset, vectors)?;
             },
 
             // Initialize this early because `gsp_resources` depends on it.

@@ -14,6 +14,7 @@ use kernel::{
 };
 
 use crate::{
+    driver::Bar0,
     falcon::{
         Falcon,
         FalconEngine,
@@ -36,14 +37,40 @@ impl RegisterBase<PFalcon2Base> for Gsp {
 
 impl FalconEngine for Gsp {}
 
+impl Gsp {
+    /// Clears the GSP falcon SWGEN0 interrupt latch.
+    ///
+    /// The latch holds until it is cleared, and the GSP drives no new edge into the interrupt
+    /// tree while it is set, so a caller that consumed a notification by any means other than the
+    /// interrupt handler must clear it or no further notification is delivered.
+    pub(crate) fn clear_swgen0_intr(bar: Bar0<'_>) {
+        bar.write(
+            WithBase::of::<Self>(),
+            regs::NV_PFALCON_FALCON_IRQSCLR::zeroed().with_swgen0(true),
+        );
+    }
+
+    /// Reads the GSP falcon interrupt status, clearing the SWGEN0 latch if it was set.
+    ///
+    /// Returns the status as it was read, before the clear. The GSP raises SWGEN0 when it has
+    /// posted messages in the GSP-to-CPU queue. The interrupt tree routes every falcon cause to
+    /// a single vector, so the rest of the status identifies a cause other than a posted message.
+    pub(crate) fn take_swgen0_intr(bar: Bar0<'_>) -> regs::NV_PFALCON_FALCON_IRQSTAT {
+        let status = bar.read(regs::NV_PFALCON_FALCON_IRQSTAT::of::<Self>());
+
+        if status.swgen0() {
+            Self::clear_swgen0_intr(bar);
+        }
+
+        status
+    }
+}
+
 impl<'a> Falcon<'a, Gsp> {
     /// Clears the SWGEN0 bit in the Falcon's IRQ status clear register to
     /// allow GSP to signal CPU for processing new messages in message queue.
     pub(crate) fn clear_swgen0_intr(&self) {
-        self.bar.write(
-            WithBase::of::<Gsp>(),
-            regs::NV_PFALCON_FALCON_IRQSCLR::zeroed().with_swgen0(true),
-        );
+        Gsp::clear_swgen0_intr(self.bar);
     }
 
     /// Checks if GSP reload/resume has completed during the boot process.

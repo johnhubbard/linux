@@ -120,6 +120,10 @@ register! {
         4:4     halt => bool;
     }
 
+    pub(crate) NV_PFALCON_FALCON_IRQSTAT(u32) @ PFalconBase + 0x00000008 {
+        6:6     swgen0 => bool;
+    }
+
     pub(crate) NV_PFALCON_FALCON_MAILBOX0(u32) @ PFalconBase + 0x00000040 {
         31:0    value => u32;
     }
