@@ -503,3 +503,113 @@ impl Drop for TopEnableGuard<'_> {
         clear_top_enables(self.bar, self.serviced);
     }
 }
+
+#[kunit_tests(nova_core_gin_tree)]
+mod tests {
+    use super::*;
+
+    /// A leaf index is a `Bounded<usize, 4>`, so it accepts 0..=15 and rejects 16.
+    #[test]
+    fn leaf_index_bounds() {
+        assert!(LeafIndex::try_new(0).is_some());
+        assert!(LeafIndex::try_new(15).is_some());
+        assert!(LeafIndex::try_new(16).is_none());
+    }
+
+    /// A leaf count yields one subtree per pair of leaves, and 32 vectors per leaf.
+    #[test]
+    fn leaf_count_derives_subtrees_and_vectors() {
+        assert_eq!(LeafCount::Eight.subtree_count(), 4);
+        assert_eq!(LeafCount::Eight.subtree_set().into_raw(), 0x0f);
+        assert_eq!(LeafCount::Eight.vector_count(), 256);
+
+        assert_eq!(LeafCount::Sixteen.subtree_count(), 8);
+        assert_eq!(LeafCount::Sixteen.subtree_set().into_raw(), 0xff);
+        assert_eq!(LeafCount::Sixteen.vector_count(), 512);
+    }
+
+    /// Subtree `N` covers the two adjacent leaves `2N` and `2N + 1`, and an index past the leaf
+    /// register arrays yields nothing.
+    #[test]
+    fn subtree_covers_two_adjacent_leaves() {
+        for index in 0..8u32 {
+            let first = crate::num::u32_as_usize(index) * 2;
+            let mut leaves = subtree_leaves(index);
+
+            assert_eq!(leaves.next().map(LeafIndex::get), Some(first));
+            assert_eq!(leaves.next().map(LeafIndex::get), Some(first + 1));
+            assert!(leaves.next().is_none());
+        }
+
+        // Subtree 8 would cover leaves 16 and 17, both beyond the leaf index range.
+        assert!(subtree_leaves(8).next().is_none());
+    }
+
+    /// A vector maps to its leaf, its bit within that leaf, and its subtree. The fixed doorbell
+    /// (129) and GSP (155) vectors share a subtree, so one allocation and one enabled subtree
+    /// serve both.
+    #[test]
+    fn vector_maps_to_leaf_bit_and_subtree() {
+        let doorbell = GinVector::new::<129>();
+        let gsp = GinVector::new::<155>();
+
+        assert_eq!(doorbell.leaf_index().get(), 4);
+        assert_eq!(doorbell.leaf_mask().into_raw(), 1 << 1);
+        assert_eq!(doorbell.subtree().index(), 2);
+
+        assert_eq!(gsp.leaf_index().get(), 4);
+        assert_eq!(gsp.leaf_mask().into_raw(), 1 << 27);
+        assert_eq!(gsp.subtree().index(), 2);
+
+        assert_eq!(doorbell.subtree(), gsp.subtree());
+    }
+
+    /// Both fixed vectors lie within the 8-leaf tree, so every supported part carries them.
+    #[test]
+    fn fixed_vectors_fit_the_narrowest_tree() {
+        assert!(GinVector::new::<129>().validate(LeafCount::Eight).is_ok());
+        assert!(GinVector::new::<155>().validate(LeafCount::Eight).is_ok());
+
+        // The first vector beyond an 8-leaf tree.
+        assert!(GinVector::new::<256>().validate(LeafCount::Eight).is_err());
+        assert!(GinVector::new::<256>().validate(LeafCount::Sixteen).is_ok());
+    }
+
+    /// A subtree set reports membership, intersection, and how far it extends from subtree 0.
+    #[test]
+    fn subtree_set_operations() {
+        let gsp = GinVector::new::<155>().subtree();
+
+        assert!(LeafCount::Eight.subtree_set().contains(gsp));
+        assert!(!LeafCount::Eight.subtree_set().is_empty());
+
+        // Subtree 2 is the highest the GSP needs, so an MSI-X request covers entries 0 through 2.
+        assert_eq!(SubtreeSet::from(gsp).span(), 3);
+
+        // Hopper implements every subtree an 8-leaf tree does.
+        assert_eq!(
+            LeafCount::Sixteen
+                .subtree_set()
+                .intersection(LeafCount::Eight.subtree_set()),
+            LeafCount::Eight.subtree_set()
+        );
+    }
+
+    /// Every supported chipset implements the subtree that carries the GSP notification.
+    #[test]
+    fn gsp_subtree_is_implemented_everywhere() {
+        for chipset in [
+            Chipset::TU102,
+            Chipset::GA102,
+            Chipset::AD102,
+            Chipset::GH100,
+            Chipset::GB100,
+            Chipset::GB202,
+        ] {
+            assert!(cpu_interrupt_hal(chipset)
+                .leaf_count()
+                .subtree_set()
+                .contains(crate::irq::gsp::GSP_SUBTREE));
+        }
+    }
+}
