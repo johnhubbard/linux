@@ -3,6 +3,7 @@
 mod continuation;
 
 use core::{
+    cell::Cell,
     mem,
     sync::atomic::{
         fence,
@@ -523,6 +524,7 @@ impl Cmdq {
                     gsp_mem,
                     elem_seq: 0,
                     rpc_seq: 0,
+                    poisoned: Cell::new(false),
                 }),
             }))
         })
@@ -622,6 +624,12 @@ struct CmdqInner {
     /// [`CmdqInner::receive_msg`] match that reply to the awaiting command. Advances once per
     /// logical command.
     rpc_seq: u32,
+    /// Set once a message with corrupt framing or a bad checksum is seen. Such a message has an
+    /// untrusted length, so the queue cannot be advanced past it, and every later receive fails
+    /// until the queue is torn down and reset.
+    ///
+    /// A [`Cell`], so the shared-borrow read path [`Self::wait_for_msg`] can set it.
+    poisoned: Cell<bool>,
     /// Memory area shared with the GSP for communicating commands and messages.
     gsp_mem: DmaGspMem,
 }
@@ -748,11 +756,13 @@ impl CmdqInner {
     /// # Errors
     ///
     /// - `ETIMEDOUT` if `timeout` has elapsed before any message becomes available.
-    /// - `EIO` if there was some inconsistency (e.g. message shorter than advertised) on the
-    ///   message queue.
-    ///
-    /// Error codes returned by the message constructor are propagated as-is.
+    /// - `EIO` if the framing or the checksum is invalid, or the queue was already poisoned by an
+    ///   earlier such failure. Either failure poisons the queue, so recovery requires a reset.
     fn wait_for_msg(&self, timeout: Delta) -> Result<GspMessage<'_>> {
+        if self.poisoned.get() {
+            return Err(EIO);
+        }
+
         // Wait for a message to arrive from the GSP.
         let (slice_1, slice_2) = read_poll_timeout(
             || Ok(self.gsp_mem.driver_read_area()),
@@ -763,7 +773,10 @@ impl CmdqInner {
         .map(|(slice_1, slice_2)| (slice_1.as_flattened(), slice_2.as_flattened()))?;
 
         // Extract the `GspMsgElement`.
-        let (header, slice_1) = GspMsgElement::from_bytes_prefix(slice_1).ok_or(EIO)?;
+        let Some((header, slice_1)) = GspMsgElement::from_bytes_prefix(slice_1) else {
+            self.poisoned.set(true);
+            return Err(EIO);
+        };
 
         dev_dbg!(
             &self.dev,
@@ -777,6 +790,7 @@ impl CmdqInner {
 
         // Check that the driver read area is large enough for the message.
         if slice_1.len() + slice_2.len() < payload_length {
+            self.poisoned.set(true);
             return Err(EIO);
         }
 
@@ -805,6 +819,7 @@ impl CmdqInner {
                 "GSP RPC: receive: Call {} - bad checksum\n",
                 header.sequence()
             );
+            self.poisoned.set(true);
             return Err(EIO);
         }
 
@@ -830,8 +845,8 @@ impl CmdqInner {
     /// # Errors
     ///
     /// - `ETIMEDOUT` if `timeout` has elapsed before any message becomes available.
-    /// - `EIO` if there was some inconsistency (e.g. message shorter than advertised) on the
-    ///   message queue.
+    /// - `EIO` if the queue is poisoned or the message fails framing or checksum validation (see
+    ///   [`Self::wait_for_msg`]), or if the matched message is too short for `M::Message`.
     /// - `ERANGE` if the message was not the awaited reply.
     ///
     /// Error codes returned by [`MessageFromGsp::read`] are propagated as-is.
@@ -850,22 +865,26 @@ impl CmdqInner {
         let func_matches = matches!(function, Ok(f) if f == M::FUNCTION);
         let matched = func_matches && expected_seq.is_none_or(|expected| seq == expected);
 
-        // Every path must advance the read pointer past this message.
+        // Every path must advance the read pointer past this message, including a failed decode.
         let result = if matched {
-            let (cmd, contents_1) = M::Message::from_bytes_prefix(message.contents.0).ok_or(EIO)?;
-            let mut sbuffer = SBufferIter::new_reader([contents_1, message.contents.1]);
+            match M::Message::from_bytes_prefix(message.contents.0) {
+                Some((cmd, contents_1)) => {
+                    let mut sbuffer = SBufferIter::new_reader([contents_1, message.contents.1]);
 
-            M::read(cmd, &mut sbuffer)
-                .map_err(|e| e.into())
-                .inspect(|_| {
-                    if !sbuffer.is_empty() {
-                        dev_warn!(
-                            &self.dev,
-                            "GSP message {:?} has unprocessed data\n",
-                            M::FUNCTION
-                        );
-                    }
-                })
+                    M::read(cmd, &mut sbuffer)
+                        .map_err(|e| e.into())
+                        .inspect(|_| {
+                            if !sbuffer.is_empty() {
+                                dev_warn!(
+                                    &self.dev,
+                                    "GSP message {:?} has unprocessed data\n",
+                                    M::FUNCTION
+                                );
+                            }
+                        })
+                }
+                None => Err(EIO),
+            }
         } else {
             Err(ERANGE)
         };
