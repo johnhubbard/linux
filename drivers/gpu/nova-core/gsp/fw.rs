@@ -782,13 +782,14 @@ impl MsgHeaderVersion {
 }
 
 impl bindings::rpc_message_header_v {
-    fn init(cmd_size: usize, function: MsgFunction) -> impl Init<Self, Error> {
+    fn init(sequence: u32, cmd_size: usize, function: MsgFunction) -> impl Init<Self, Error> {
         type RpcMessageHeader = bindings::rpc_message_header_v;
 
         try_init!(RpcMessageHeader {
             header_version: MsgHeaderVersion::new().into(),
             signature: bindings::NV_VGPU_MSG_SIGNATURE_VALID,
             function: function.into(),
+            sequence,
             length: size_of::<Self>()
                 .checked_add(cmd_size)
                 .ok_or(EOVERFLOW)
@@ -813,25 +814,27 @@ impl GspMsgElement {
     ///
     /// # Arguments
     ///
-    /// * `sequence` - Sequence number of the message.
+    /// * `elem_seq` - Transport sequence number of the queue element (`seqNum`).
+    /// * `rpc_seq` - RPC sequence number, echoed by the GSP in the reply.
     /// * `cmd_size` - Size of the command (not including the message element), in bytes.
     /// * `function` - Function of the message.
     pub(crate) fn init(
-        sequence: u32,
+        elem_seq: u32,
+        rpc_seq: u32,
         cmd_size: usize,
         function: MsgFunction,
     ) -> impl Init<Self, Error> {
         type RpcMessageHeader = bindings::rpc_message_header_v;
         type InnerGspMsgElement = bindings::GSP_MSG_QUEUE_ELEMENT;
         let init_inner = try_init!(InnerGspMsgElement {
-            seqNum: sequence,
+            seqNum: elem_seq,
             elemCount: size_of::<Self>()
                 .checked_add(cmd_size)
                 .ok_or(EOVERFLOW)?
                 .div_ceil(GSP_PAGE_SIZE)
                 .try_into()
                 .map_err(|_| EOVERFLOW)?,
-            rpc <- RpcMessageHeader::init(cmd_size, function),
+            rpc <- RpcMessageHeader::init(rpc_seq, cmd_size, function),
             ..Zeroable::init_zeroed()
         });
 
