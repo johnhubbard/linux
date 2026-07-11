@@ -30,7 +30,11 @@ use kernel::{
         aref::ARef,
         Mutex, //
     },
-    time::Delta,
+    time::{
+        Delta,
+        Instant,
+        Monotonic, //
+    },
     transmute::{
         AsBytes,
         FromBytes, //
@@ -558,8 +562,9 @@ impl Cmdq {
     ///
     /// # Errors
     ///
-    /// - `ETIMEDOUT` if space does not become available to send the command, or if the reply is
-    ///   not received within the timeout.
+    /// - `ETIMEDOUT` if space does not become available to send the command, or if the reply does
+    ///   not arrive within [`Self::RECEIVE_TIMEOUT`] of the send, however many events are
+    ///   dispatched while waiting.
     /// - `EIO` if the variable payload requested by the command has not been entirely
     ///   written to by its [`CommandToGsp::init_variable_payload`] method.
     ///
@@ -574,8 +579,13 @@ impl Cmdq {
         let mut inner = self.inner.lock();
         let expected_seq = inner.send_command(bar, command)?;
 
+        let deadline = Instant::<Monotonic>::now() + Self::RECEIVE_TIMEOUT;
         loop {
-            match inner.receive_msg::<M::Reply>(Self::RECEIVE_TIMEOUT, Some(expected_seq)) {
+            let remaining = deadline - Instant::<Monotonic>::now();
+            if remaining.is_negative() {
+                break Err(ETIMEDOUT);
+            }
+            match inner.receive_msg::<M::Reply>(remaining, Some(expected_seq)) {
                 Ok(reply) => break Ok(reply),
                 Err(ERANGE) => continue,
                 Err(e) => break Err(e),
@@ -600,16 +610,42 @@ impl Cmdq {
         self.inner.lock().send_command(bar, command).map(|_| ())
     }
 
-    /// Receive a message from the GSP.
+    /// Receive a message from the GSP, matching on the function code alone.
     ///
-    /// Matches on the function code alone, for a caller awaiting an unsolicited GSP event rather
-    /// than a reply to a command. See [`CmdqInner::receive_msg`].
-    pub(crate) fn receive_msg<M: MessageFromGsp>(&self, timeout: Delta) -> Result<M>
+    /// Returns `ERANGE` if the message that arrives is not of type `M`. See
+    /// [`CmdqInner::receive_msg`].
+    fn receive_msg<M: MessageFromGsp>(&self, timeout: Delta) -> Result<M>
     where
         // This allows all error types, including `Infallible`, to be used for `M::InitError`.
         Error: From<M::InitError>,
     {
         self.inner.lock().receive_msg(timeout, None)
+    }
+
+    /// Waits for an unsolicited GSP event of type `M`, dispatching any other event that arrives
+    /// first.
+    ///
+    /// # Errors
+    ///
+    /// - `ETIMEDOUT` if the event does not arrive within [`Self::RECEIVE_TIMEOUT`] of the call,
+    ///   however many other events are dispatched while waiting.
+    pub(crate) fn await_msg<M: MessageFromGsp>(&self) -> Result<M>
+    where
+        // This allows all error types, including `Infallible`, to be used for `M::InitError`.
+        Error: From<M::InitError>,
+    {
+        let deadline = Instant::<Monotonic>::now() + Self::RECEIVE_TIMEOUT;
+        loop {
+            let remaining = deadline - Instant::<Monotonic>::now();
+            if remaining.is_negative() {
+                break Err(ETIMEDOUT);
+            }
+            match self.receive_msg::<M>(remaining) {
+                Ok(msg) => break Ok(msg),
+                Err(ERANGE) => continue,
+                Err(e) => break Err(e),
+            }
+        }
     }
 }
 
