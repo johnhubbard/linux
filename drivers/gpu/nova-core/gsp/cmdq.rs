@@ -33,7 +33,11 @@ use kernel::{
         },
         Mutex, //
     },
-    time::Delta,
+    time::{
+        Delta,
+        Instant,
+        Monotonic, //
+    },
     transmute::{
         AsBytes,
         FromBytes, //
@@ -569,8 +573,9 @@ impl Cmdq {
     ///
     /// # Errors
     ///
-    /// - `ETIMEDOUT` if space does not become available to send the command, or if the reply is
-    ///   not received within the timeout.
+    /// - `ETIMEDOUT` if space does not become available to send the command, or if the reply does
+    ///   not arrive within [`Self::RECEIVE_TIMEOUT`] of the send, however many events arrive
+    ///   while waiting.
     /// - `EIO` if the variable payload requested by the command has not been entirely
     ///   written to by its [`CommandToGsp::init_variable_payload`] method.
     ///
@@ -585,8 +590,13 @@ impl Cmdq {
         let mut inner = self.inner.lock();
         inner.send_command(bar, command)?;
 
+        let deadline = Instant::<Monotonic>::now() + Self::RECEIVE_TIMEOUT;
         loop {
-            match inner.receive_msg::<M::Reply>(Self::RECEIVE_TIMEOUT) {
+            let remaining = deadline - Instant::<Monotonic>::now();
+            if remaining.is_negative() {
+                break Err(ETIMEDOUT);
+            }
+            match inner.receive_msg::<M::Reply>(remaining) {
                 Ok(reply) => break Ok(reply),
                 Err(ERANGE) => continue,
                 Err(e) => break Err(e),
@@ -611,15 +621,39 @@ impl Cmdq {
         self.inner.lock().send_command(bar, command)
     }
 
-    /// Receive a message from the GSP.
+    /// Waits for an unsolicited GSP event of type `M`, logging any other event that arrives
+    /// first.
     ///
-    /// See [`CmdqInner::receive_msg`] for details.
-    pub(crate) fn receive_msg<M: MessageFromGsp>(&self, timeout: Delta) -> Result<M>
+    /// The queue is locked for the whole wait, for up to [`Self::RECEIVE_TIMEOUT`], so a
+    /// concurrent command cannot consume the awaited event.
+    ///
+    /// # Errors
+    ///
+    /// - `ETIMEDOUT` if the event does not arrive within [`Self::RECEIVE_TIMEOUT`] of the call,
+    ///   however many other events arrive while waiting.
+    /// - `EIO` if the queue is poisoned or a message fails framing or checksum validation (see
+    ///   [`CmdqInner::wait_for_msg`]).
+    ///
+    /// Error codes returned by [`MessageFromGsp::read`] are propagated as-is.
+    pub(crate) fn await_msg<M: MessageFromGsp>(&self) -> Result<M>
     where
         // This allows all error types, including `Infallible`, to be used for `M::InitError`.
         Error: From<M::InitError>,
     {
-        self.inner.lock().receive_msg(timeout)
+        let mut inner = self.inner.lock();
+
+        let deadline = Instant::<Monotonic>::now() + Self::RECEIVE_TIMEOUT;
+        loop {
+            let remaining = deadline - Instant::<Monotonic>::now();
+            if remaining.is_negative() {
+                break Err(ETIMEDOUT);
+            }
+            match inner.receive_msg::<M>(remaining) {
+                Ok(msg) => break Ok(msg),
+                Err(ERANGE) => continue,
+                Err(e) => break Err(e),
+            }
+        }
     }
 }
 
