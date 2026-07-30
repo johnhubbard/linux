@@ -100,11 +100,12 @@ impl<'a> From<IrqVector<'a>> for IrqRequest<'a> {
 ///
 /// # Invariants
 ///
-/// `dev` has an allocation of `count` interrupt vectors.
+/// `dev` has an allocation of `count` interrupt vectors of type `irq_type`.
 #[derive(Clone, Copy)]
 pub struct IrqAllocation<'a> {
     dev: &'a Device<Bound>,
     count: NonZero<u32>,
+    irq_type: IrqType,
 }
 
 impl<'a> IrqAllocation<'a> {
@@ -113,6 +114,15 @@ impl<'a> IrqAllocation<'a> {
     /// This is at least the `min_vecs` that [`Device::alloc_irq_vectors`] was asked for.
     pub fn count(&self) -> NonZero<u32> {
         self.count
+    }
+
+    /// Returns the interrupt type the PCI core selected.
+    ///
+    /// [`Device::alloc_irq_vectors`] takes a set of acceptable types and picks one of them, so a
+    /// driver whose behavior depends on the type asks for it here rather than assuming. Every
+    /// vector of the allocation has this type.
+    pub fn irq_type(&self) -> IrqType {
+        self.irq_type
     }
 
     /// Resolves the vector at `index` to the Linux IRQ number that delivers it.
@@ -177,9 +187,21 @@ impl IrqVectorRegistration {
         // `pci_alloc_irq_vectors` returns the number of vectors it allocated.
         let count = NonZero::new(ret as u32).ok_or(EINVAL)?;
 
-        // INVARIANT: `pci_alloc_irq_vectors` allocated `count` vectors for `dev`, numbered
-        // from 0.
-        let vectors = IrqAllocation { dev, count };
+        // SAFETY: `dev.as_raw()` is a valid pointer to a `struct pci_dev`.
+        let irq_type = match unsafe { bindings::pci_irq_type(dev.as_raw()) } {
+            bindings::PCI_IRQ_MSIX => IrqType::MsiX,
+            bindings::PCI_IRQ_MSI => IrqType::Msi,
+            // The helper returns `PCI_IRQ_INTX` when neither MSI nor MSI-X is enabled.
+            _ => IrqType::Intx,
+        };
+
+        // INVARIANT: `pci_alloc_irq_vectors` allocated `count` vectors of `irq_type` for `dev`,
+        // numbered from 0.
+        let vectors = IrqAllocation {
+            dev,
+            count,
+            irq_type,
+        };
 
         // INVARIANT: The IRQ vector allocation for `dev` above was successful.
         let irq_vecs = Self { dev: dev.into() };
