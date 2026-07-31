@@ -8,6 +8,8 @@
 //!
 //! See `Documentation/gpu/nova/core/interrupts.rst`.
 
+#[cfg(CONFIG_NOVA_CORE_IRQ_SELFTEST)]
+pub(crate) mod doorbell_test;
 mod hal;
 mod interrupt_tree;
 mod regs;
@@ -25,9 +27,16 @@ use kernel::{
 use crate::num;
 
 use interrupt_tree::{
+    GinVector,
     Subtree,
     SubtreeSet, //
 };
+
+/// The subtree nova-core allocates PCI vectors for.
+///
+/// Every source nova-core services latches in this one subtree, so a single allocation covers all
+/// of them.
+pub(crate) const SERVICED_SUBTREE: Subtree = GinVector::new::<129>().subtree();
 
 /// The message-signaled interrupt type a vector allocation obtained.
 ///

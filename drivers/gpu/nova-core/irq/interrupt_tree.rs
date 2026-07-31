@@ -420,7 +420,7 @@ impl<'a> Tree<'a> {
     ///
     /// `EINVAL` if `vector` lies outside this tree.
     // Only the interrupt self-test injects a software interrupt.
-    #[expect(dead_code)]
+    #[cfg_attr(not(CONFIG_NOVA_CORE_IRQ_SELFTEST), expect(dead_code))]
     pub(super) fn trigger(&self, vector: GinVector) -> Result {
         vector.validate(self.leaves)?;
         self.bar.write_reg(

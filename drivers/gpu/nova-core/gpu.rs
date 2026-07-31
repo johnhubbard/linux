@@ -29,6 +29,7 @@ use crate::{
         Gsp,
         GspBootContext, //
     },
+    irq::SubtreeVectors,
     vgpu::VgpuManager, //
 };
 
@@ -292,6 +293,12 @@ pub(crate) struct Gpu<'gpu> {
     /// Must be kept declared *after* `gsp_resources`, as the latter's `PinnedDrop` implementation
     /// requires the sysmem flush page to be in place.
     sysmem_flush: SysmemFlush<'gpu>,
+    /// Self-referential borrow of `vectors`, so this does not have to be repeated in the
+    /// constructor. Will go away with self-referential pin-init.
+    vectors_ref: &'gpu SubtreeVectors<'gpu>,
+    /// PCI interrupt vector allocation. Dropped last (struct field drop order).
+    #[pin]
+    vectors: SubtreeVectors<'gpu>,
 }
 
 #[pinned_drop]
@@ -330,6 +337,12 @@ impl<'gpu> Gpu<'gpu> {
         let dev = pdev.as_ref();
 
         try_pin_init!(Self {
+            vectors: crate::irq::alloc_vectors(pdev, crate::irq::SERVICED_SUBTREE.into())?,
+
+            // SAFETY: `vectors` is initialized above, lives at a pinned stable address, and is
+            // dropped after every field that uses `vectors_ref` (struct field drop order).
+            vectors_ref: unsafe { &*core::ptr::from_ref(vectors.as_ref().get_ref()) },
+
             spec: Spec::new(dev, bar).inspect(|spec| {
                 dev_info!(dev,"NVIDIA ({})\n", spec);
             })?,
@@ -345,6 +358,18 @@ impl<'gpu> Gpu<'gpu> {
 
                 hal.wait_gfw_boot_completion(bar)
                     .inspect_err(|_| dev_err!(dev, "GFW boot did not complete\n"))?;
+            },
+
+            // Validate the MSI interrupt path before booting GSP, when the self-test is
+            // enabled. This runs on a quiesced interrupt tree with no GSP state present, so it
+            // never observes or clears GSP or PRIV_RING interrupts.
+            _: {
+                // `vectors_ref` exists for the self-test below, which this configuration omits.
+                #[cfg(not(CONFIG_NOVA_CORE_IRQ_SELFTEST))]
+                let _ = vectors_ref;
+
+                #[cfg(CONFIG_NOVA_CORE_IRQ_SELFTEST)]
+                crate::irq::doorbell_test::run_selftest(pdev, bar, spec.chipset, vectors_ref)?;
             },
 
             // Initialize this early because `gsp_resources` depends on it.
