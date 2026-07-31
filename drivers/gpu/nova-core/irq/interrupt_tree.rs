@@ -240,6 +240,30 @@ impl GinVector {
     }
 }
 
+/// Clears the enables of the vectors set in `vectors` for `leaf` (`LEAF_EN_CLEAR`).
+///
+/// Shared by [`Tree::disable_leaf`] and by [`LeafEnableGuard`]'s [`Drop`], which has no tree to
+/// reach through.
+fn clear_leaf_enables(bar: Bar0<'_>, leaf: LeafIndex, vectors: LeafMask) {
+    if let Some(loc) = CPU_INTR_LEAF_EN_CLEAR::try_at(leaf.get()) {
+        bar.write(loc, vectors.into_raw().into());
+    }
+}
+
+/// Clears the `TOP` enables of every subtree in `serviced` (`TOP_EN_CLEAR`).
+fn clear_top_enables(bar: Bar0<'_>, serviced: SubtreeSet) {
+    bar.write(CPU_INTR_TOP_EN_CLEAR, serviced.into_raw().into());
+}
+
+/// Clears the pending vectors set in `vectors` for `leaf` (write-1-to-clear).
+fn clear_leaf_pending(bar: Bar0<'_>, leaf: LeafIndex, vectors: LeafMask) {
+    if !vectors.is_empty() {
+        if let Some(loc) = CPU_INTR_LEAF::try_at(leaf.get()) {
+            bar.write(loc, vectors.into_raw().into());
+        }
+    }
+}
+
 /// Returns the leaves that subtree `index` covers.
 ///
 /// An index beyond the leaf register arrays yields nothing rather than panicking.
@@ -251,6 +275,10 @@ fn subtree_leaves(index: u32) -> impl Iterator<Item = LeafIndex> {
 }
 
 /// The GIN CPU interrupt tree for a single PCIe function.
+///
+/// Copying one is copying a borrowed BAR pointer and three small values, which an interrupt
+/// handler needs so that it owns a tree of its own.
+#[derive(Clone, Copy)]
 pub(super) struct Tree<'a> {
     /// Borrowed BAR0, through which every tree register is reached.
     bar: Bar0<'a>,
@@ -287,11 +315,6 @@ impl<'a> Tree<'a> {
         }
     }
 
-    /// Returns the subtrees this tree services.
-    pub(super) fn serviced(&self) -> SubtreeSet {
-        self.serviced
-    }
-
     /// Rearms PCI interrupt delivery to the CPU after servicing `subtree`, the one subtree the
     /// calling handler serves.
     ///
@@ -310,15 +333,17 @@ impl<'a> Tree<'a> {
 
     /// Disables this tree's serviced subtrees (`TOP_EN_CLEAR`).
     pub(super) fn disable_top(&self) {
-        self.bar
-            .write(CPU_INTR_TOP_EN_CLEAR, self.serviced.into_raw().into());
+        clear_top_enables(self.bar, self.serviced);
     }
 
     /// Enables this tree's serviced subtrees until the returned guard drops.
-    pub(super) fn enable_top_guarded(&self) -> TopEnableGuard<'_> {
+    pub(super) fn enable_top_guarded(&self) -> TopEnableGuard<'a> {
         self.enable_top();
 
-        TopEnableGuard { tree: self }
+        TopEnableGuard {
+            bar: self.bar,
+            serviced: self.serviced,
+        }
     }
 
     /// Enables the vectors set in `vectors` for `leaf` (`LEAF_EN_SET`).
@@ -332,9 +357,7 @@ impl<'a> Tree<'a> {
 
     /// Disables the vectors set in `vectors` for `leaf` (`LEAF_EN_CLEAR`).
     pub(super) fn disable_leaf(&self, leaf: LeafIndex, vectors: LeafMask) {
-        if let Some(loc) = CPU_INTR_LEAF_EN_CLEAR::try_at(leaf.get()) {
-            self.bar.write(loc, vectors.into_raw().into());
-        }
+        clear_leaf_enables(self.bar, leaf, vectors);
     }
 
     /// Enables `vectors` for `leaf` until the returned guard drops.
@@ -342,24 +365,24 @@ impl<'a> Tree<'a> {
         &self,
         leaf: LeafIndex,
         vectors: LeafMask,
-    ) -> LeafEnableGuard<'_> {
+    ) -> LeafEnableGuard<'a> {
         self.enable_leaf(leaf, vectors);
 
         LeafEnableGuard {
-            tree: self,
+            bar: self.bar,
             leaf,
             vectors,
         }
     }
 
     /// Reads the vectors pending in `leaf`.
-    pub(super) fn read_pending(&self, leaf: LeafIndex) -> LeafPending<'_> {
+    pub(super) fn read_pending(&self, leaf: LeafIndex) -> LeafPending<'a> {
         let pending = CPU_INTR_LEAF::try_at(leaf.get())
             .map(|loc| self.bar.read(loc).into_raw())
             .unwrap_or(0);
 
         LeafPending {
-            tree: self,
+            bar: self.bar,
             leaf,
             pending: LeafMask::from_raw(pending),
         }
@@ -389,6 +412,7 @@ impl<'a> Tree<'a> {
     ///
     /// This clears enables outside the subtrees nova-core services, so it is a probe-time
     /// operation only.
+    #[expect(dead_code)]
     pub(super) fn disable_all_leaves(&self) {
         for index in 0..self.leaves.into_raw() {
             if let Some(leaf) = LeafIndex::try_new(index) {
@@ -427,7 +451,7 @@ impl<'a> Tree<'a> {
 /// Holding one is the proof that the leaf was read, which is what [`Self::clear`] and
 /// [`Self::clear_vectors`] require.
 pub(super) struct LeafPending<'a> {
-    tree: &'a Tree<'a>,
+    bar: Bar0<'a>,
     leaf: LeafIndex,
     pending: LeafMask,
 }
@@ -449,11 +473,7 @@ impl LeafPending<'_> {
     /// A handler that services one vector uses this rather than [`Self::clear`], which clears
     /// every vector the leaf had pending.
     pub(super) fn clear_vectors(&self, vectors: LeafMask) {
-        if !vectors.is_empty() {
-            if let Some(loc) = CPU_INTR_LEAF::try_at(self.leaf.get()) {
-                self.tree.bar.write(loc, vectors.into_raw().into());
-            }
-        }
+        clear_leaf_pending(self.bar, self.leaf, vectors);
     }
 }
 
@@ -462,24 +482,25 @@ impl LeafPending<'_> {
 /// Dropping it disables the same vectors, so an error path cannot leave a source enabled with no
 /// handler behind it.
 pub(super) struct LeafEnableGuard<'a> {
-    tree: &'a Tree<'a>,
+    bar: Bar0<'a>,
     leaf: LeafIndex,
     vectors: LeafMask,
 }
 
 impl Drop for LeafEnableGuard<'_> {
     fn drop(&mut self) {
-        self.tree.disable_leaf(self.leaf, self.vectors);
+        clear_leaf_enables(self.bar, self.leaf, self.vectors);
     }
 }
 
 /// Keeps a tree's serviced subtrees enabled at `TOP` for as long as it is held.
 pub(super) struct TopEnableGuard<'a> {
-    tree: &'a Tree<'a>,
+    bar: Bar0<'a>,
+    serviced: SubtreeSet,
 }
 
 impl Drop for TopEnableGuard<'_> {
     fn drop(&mut self) {
-        self.tree.disable_top();
+        clear_top_enables(self.bar, self.serviced);
     }
 }

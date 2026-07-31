@@ -347,6 +347,14 @@ impl<'gpu> Gpu<'gpu> {
                     .inspect_err(|_| dev_err!(dev, "GFW boot did not complete\n"))?;
             },
 
+            // Validate the MSI interrupt path before booting GSP, when the self-test is
+            // enabled. This runs on a quiesced interrupt tree with no GSP state present, so it
+            // never observes or clears GSP or PRIV_RING interrupts.
+            _: {
+                #[cfg(CONFIG_NOVA_CORE_IRQ_SELFTEST)]
+                crate::irq::doorbell_test::run_selftest(pdev, bar, spec.chipset)?;
+            },
+
             // Initialize this early because `gsp_resources` depends on it.
             sysmem_flush: SysmemFlush::register(dev, bar, spec.chipset)?,
 
