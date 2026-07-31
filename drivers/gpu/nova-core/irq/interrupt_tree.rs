@@ -402,7 +402,7 @@ impl<'a> Tree<'a> {
     ///
     /// `EINVAL` if this tree does not implement `vector`.
     // The interrupt self-test is the only caller.
-    #[expect(dead_code)]
+    #[cfg_attr(not(CONFIG_NOVA_CORE_SELFTESTS), expect(dead_code))]
     pub(super) fn trigger(&self, vector: GinVector) -> Result {
         vector.validate(self.leaves)?;
         self.bar.write_reg(
