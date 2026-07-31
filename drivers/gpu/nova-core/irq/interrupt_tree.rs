@@ -270,4 +270,17 @@ impl Leaf<Pending> {
             }
         }
     }
+
+    /// Clears the vectors set in `vectors` (write-1-to-clear), leaving every other pending bit
+    /// set.
+    ///
+    /// A handler that services one vector uses this rather than [`Self::clear_pending`], which
+    /// clears every vector the leaf had pending.
+    pub(super) fn clear_vectors(&self, bar: Bar0<'_>, vectors: u32) {
+        if vectors != 0 {
+            if let Some(loc) = CPU_INTR_LEAF::try_at(self.index.get()) {
+                bar.write(loc, vectors.into());
+            }
+        }
+    }
 }
