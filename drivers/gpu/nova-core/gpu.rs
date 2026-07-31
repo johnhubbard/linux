@@ -29,6 +29,10 @@ use crate::{
         Gsp,
         GspBootContext, //
     },
+    irq::{
+        self,
+        SubtreeVectors, //
+    },
     vgpu::VgpuManager, //
 };
 
@@ -292,6 +296,12 @@ pub(crate) struct Gpu<'gpu> {
     /// Must be kept declared *after* `gsp_resources`, as the latter's `PinnedDrop` implementation
     /// requires the sysmem flush page to be in place.
     sysmem_flush: SysmemFlush<'gpu>,
+    /// Borrow of `vectors` for the fields initialized after it, which pin-init cannot express
+    /// directly.
+    vectors_ref: &'gpu SubtreeVectors<'gpu>,
+    /// PCI interrupt vector allocation. Dropped last (struct field drop order).
+    #[pin]
+    vectors: SubtreeVectors<'gpu>,
 }
 
 #[pinned_drop]
@@ -330,6 +340,12 @@ impl<'gpu> Gpu<'gpu> {
         let dev = pdev.as_ref();
 
         try_pin_init!(Self {
+            vectors: irq::alloc_vectors(pdev, irq::SERVICED_SUBTREE.into())?,
+
+            // SAFETY: `vectors` is initialized above, is pinned at a stable address, and is
+            // dropped after every field that uses `vectors_ref` (struct field drop order).
+            vectors_ref: unsafe { &*core::ptr::from_ref(vectors.as_ref().get_ref()) },
+
             spec: Spec::new(dev, bar).inspect(|spec| {
                 dev_info!(dev,"NVIDIA ({})\n", spec);
             })?,
@@ -345,6 +361,17 @@ impl<'gpu> Gpu<'gpu> {
 
                 hal.wait_gfw_boot_completion(bar)
                     .inspect_err(|_| dev_err!(dev, "GFW boot did not complete\n"))?;
+            },
+
+            // Validate the PCI interrupt path before GSP boot, so the self-test never reads or
+            // clears GSP interrupt state.
+            _: {
+                // `vectors_ref` has no other user when the self-test is compiled out.
+                #[cfg(not(CONFIG_NOVA_CORE_IRQ_SELFTEST))]
+                let _ = vectors_ref;
+
+                #[cfg(CONFIG_NOVA_CORE_IRQ_SELFTEST)]
+                irq::doorbell_test::run_selftest(pdev, bar, spec.chipset, vectors_ref)?;
             },
 
             // Initialize this early because `gsp_resources` depends on it.
