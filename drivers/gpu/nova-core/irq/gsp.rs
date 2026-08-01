@@ -50,18 +50,17 @@ pub(crate) const GSP_SUBTREE: Subtree = GSP_INTR_0_VECTOR.subtree();
 
 /// Clears the interrupt state that GSP boot left behind.
 ///
-/// Disables every vector in every implemented leaf, clears the falcon's SWGEN0 latch, clears the
-/// tree's pending bits, and rearms PCI interrupt delivery. On return no vector is enabled, so the
-/// tree delivers nothing.
+/// Disables every vector in every implemented leaf, clears the tree's pending bits, clears the
+/// falcon's SWGEN0 latch, and rearms PCI interrupt delivery. On return no vector is enabled, so
+/// the tree delivers nothing.
 pub(crate) fn quiesce(bar: Bar0<'_>, chipset: Chipset, irq_type: pci::IrqType) {
     let tree = Tree::new(bar, chipset, irq_type, GSP_SUBTREE.into());
     tree.disable_all_leaves();
-    // GSP boot consumes its notifications by polling the queue, which leaves SWGEN0 latched.
-    // Clear it before the tree drain below, so the drain clears the tree state the clear sets.
-    // Messages already posted raise no interrupt of their own, and the caller's queue drain
-    // covers them.
-    GspFalcon::clear_swgen0_intr(bar);
     tree.drain();
+    // GSP boot consumes its notifications by polling the queue, which leaves SWGEN0 latched, and
+    // the GSP drives no new signal while it is set. Clear it after the tree drain, which erases
+    // every leaf bit and would erase the one a message posted since the clear had set.
+    GspFalcon::clear_swgen0_intr(bar);
     // The `TOP_EN` cycle in `drain` is the rearm for the two enable-cycle methods, but pre-Hopper
     // MSI rearms through a configuration-space write instead. An interrupt delivered before probe
     // leaves delivery un-armed on that path, with no handler to have rearmed it.
@@ -80,6 +79,8 @@ pub(crate) struct GspInterrupt<'a> {
     cmdq: Arc<Cmdq>,
     /// The GIN interrupt tree for this chipset.
     tree: Tree<'a>,
+    /// Chipset, for the falcon retrigger, which Turing does not implement.
+    chipset: Chipset,
     /// Device, for logging from interrupt context without taking the command-queue lock.
     dev: ARef<device::Device>,
 }
@@ -98,15 +99,18 @@ impl<'a> GspInterrupt<'a> {
             bar,
             cmdq,
             tree: Tree::new(bar, chipset, irq_type, GSP_SUBTREE.into()),
+            chipset,
             dev,
         }? Error)
     }
 }
 
 impl irq::ThreadedHandler for GspInterrupt<'_> {
-    /// Top half: clears the GIN leaf, takes the falcon SWGEN0 latch, and rearms PCI interrupt
-    /// delivery.
+    /// Top half: clears the GIN leaf, takes every cause the falcon reports, and rearms PCI
+    /// interrupt delivery.
     fn handle(&self) -> irq::ThreadedIrqReturn {
+        let bar = self.bar;
+
         // Only service our own vector: require the GSP bit in the leaf and clear just that bit, so
         // a co-pending vector in the same leaf stays pending for whoever services it. The subtree
         // stays enabled, so there is no whole-tree disable and enable.
@@ -119,27 +123,40 @@ impl irq::ThreadedHandler for GspInterrupt<'_> {
         }
         leaf.clear_vectors(GSP_INTR_0_VECTOR.leaf_mask());
 
-        // SWGEN0 is the message-queue notification, so wake the IRQ thread to drain it.
-        let status = GspFalcon::take_swgen0_intr(self.bar);
-        let ret = if status.swgen0() {
-            irq::ThreadedIrqReturn::WakeThread
-        } else {
-            // The tree routes every falcon cause to this vector, so something other than a posted
-            // message fired it, for example a HALT from a GSP crash. There is no recovery path for
-            // those causes, so report the status rather than discarding it.
+        let status = GspFalcon::take_swgen0_intr(bar);
+
+        // Every cause the falcon reports leaves the falcon's enabled set on this invocation. A
+        // cause left latched holds that set non-empty, and the falcon signals the tree only on a
+        // transition of the set, so no later SWGEN0 would signal at all.
+        let unserviceable = status.with_swgen0(false);
+        if unserviceable.into_raw() != 0 {
+            // The tree routes every falcon cause to this vector, so a cause other than a posted
+            // message also arrives here, for example a HALT from a GSP crash. nova-core has no
+            // recovery path for those, so report the status rather than discarding it, then mask
+            // the cause.
             dev_err!(
                 &self.dev,
-                "GSP interrupt with no SWGEN0, falcon IRQSTAT {:#x}\n",
+                "unserviceable GSP falcon interrupt, IRQSTAT {:#x}\n",
                 status.into_raw()
             );
-            irq::ThreadedIrqReturn::Handled
-        };
+            GspFalcon::mask_and_clear_intr(bar, unserviceable);
+        }
+
+        // The leaf clear above consumed the tree's record of this interrupt, and the falcon signals
+        // the tree only on a transition of its enabled causes, so a cause that arrived while this
+        // handler ran would never reach the CPU. Re-emit to supply that transition.
+        GspFalcon::retrigger_intr(bar, self.chipset);
 
         // Delivery resumes only after this, so it must happen on every path that services the
         // vector, including the fault path above.
         self.tree.rearm_pci_irq(GSP_SUBTREE);
 
-        ret
+        // SWGEN0 is the message-queue notification, so wake the IRQ thread to drain it.
+        if status.swgen0() {
+            irq::ThreadedIrqReturn::WakeThread
+        } else {
+            irq::ThreadedIrqReturn::Handled
+        }
     }
 
     /// IRQ thread: drains and dispatches the GSP-to-CPU message queue.

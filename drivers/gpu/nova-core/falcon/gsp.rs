@@ -16,11 +16,13 @@ use kernel::{
 use crate::{
     driver::Bar0,
     falcon::{
+        hal,
         Falcon,
         FalconEngine,
         PFalcon2Base,
         PFalconBase, //
     },
+    gpu::Chipset,
     regs,
 };
 
@@ -63,6 +65,40 @@ impl Gsp {
         }
 
         status
+    }
+
+    /// Masks and clears every interrupt cause set in `status`.
+    ///
+    /// A masked cause leaves the falcon's enabled set, so it neither raises the tree again nor
+    /// holds that set non-empty.
+    pub(crate) fn mask_and_clear_intr(bar: Bar0<'_>, status: regs::NV_PFALCON_FALCON_IRQSTAT) {
+        let causes = status.into_raw();
+
+        bar.write(
+            WithBase::of::<Self>(),
+            regs::NV_PFALCON_FALCON_IRQMCLR::zeroed().with_value(causes),
+        );
+        bar.write(
+            WithBase::of::<Self>(),
+            regs::NV_PFALCON_FALCON_IRQSCLR::from(causes),
+        );
+    }
+
+    /// Re-emits the falcon's enabled interrupt causes into the interrupt tree.
+    ///
+    /// The falcon signals the tree on a transition of its enabled causes, so clearing the tree
+    /// leaf while a cause is still latched leaves no transition and no further vector.
+    ///
+    /// Does nothing on Turing, whose falcons do not implement the register.
+    pub(crate) fn retrigger_intr(bar: Bar0<'_>, chipset: Chipset) {
+        if !hal::has_intr_retrigger(chipset) {
+            return;
+        }
+
+        bar.write(
+            WithBase::of::<Self>().at(0),
+            regs::NV_PFALCON_FALCON_INTR_RETRIGGER::zeroed().with_trigger(true),
+        );
     }
 }
 

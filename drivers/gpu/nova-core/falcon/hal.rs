@@ -72,6 +72,14 @@ pub(crate) trait FalconHal<E: FalconEngine>: Send + Sync {
     fn load_method(&self) -> LoadMethod;
 }
 
+/// Returns whether `chipset`'s falcons implement `NV_PFALCON_FALCON_INTR_RETRIGGER`.
+///
+/// Turing falcons do not. Ampere and later do, including GA100, whose falcon otherwise uses the
+/// Turing HAL, so this is keyed on the architecture rather than provided through [`FalconHal`].
+pub(crate) fn has_intr_retrigger(chipset: Chipset) -> bool {
+    !matches!(chipset.arch(), Architecture::Turing)
+}
+
 /// Returns a boxed falcon HAL adequate for `chipset`.
 ///
 /// We use a heap-allocated trait object instead of a statically defined one because the

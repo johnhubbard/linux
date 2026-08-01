@@ -124,6 +124,15 @@ register! {
         6:6     swgen0 => bool;
     }
 
+    /// Masks interrupt causes at the falcon, one bit per cause, in the layout of
+    /// `NV_PFALCON_FALCON_IRQSTAT`.
+    ///
+    /// A masked cause is excluded from the enabled set the falcon signals on, so it cannot be
+    /// raised again by `NV_PFALCON_FALCON_INTR_RETRIGGER`.
+    pub(crate) NV_PFALCON_FALCON_IRQMCLR(u32) @ PFalconBase + 0x00000014 {
+        31:0    value => u32;
+    }
+
     pub(crate) NV_PFALCON_FALCON_MAILBOX0(u32) @ PFalconBase + 0x00000040 {
         31:0    value => u32;
     }
@@ -249,6 +258,17 @@ register! {
     /// falcon instance.
     pub(crate) NV_PFALCON_FALCON_ENGINE(u32) @ PFalconBase + 0x000003c0 {
         0:0     reset => bool;
+    }
+
+    /// Re-emits the falcon's enabled interrupt causes into the interrupt tree.
+    ///
+    /// Write-only. A falcon signals the tree on a transition of its enabled causes, so a handler
+    /// that cleared the tree leaf while a cause was still latched has left no transition behind,
+    /// and this write supplies one. Turing falcons do not implement this register.
+    ///
+    /// OpenRM declares two elements and uses only the first.
+    pub(crate) NV_PFALCON_FALCON_INTR_RETRIGGER(u32)[2] @ PFalconBase + 0x000003e8 {
+        0:0     trigger => bool;
     }
 
     pub(crate) NV_PFALCON_FBIF_TRANSCFG(u32)[8] @ PFalconBase + 0x00000600 {
