@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+use kernel::{
+    device::Bound,
+    pci::{
+        self,
+        IrqType,
+        IrqTypes, //
+    },
+    prelude::*,
+};
+
+pub(crate) fn alloc_vector(pdev: &pci::Device<Bound>) -> Result<pci::IrqVectorRegistration<'_>> {
+    let msi_types = IrqTypes::default().with(IrqType::Msi).with(IrqType::MsiX);
+
+    pdev.alloc_irq_vectors(1, 1, msi_types).or_else(|_| {
+        dev_warn!(pdev.as_ref(), "MSI not available, falling back to INTx\n");
+        pdev.alloc_irq_vectors(1, 1, IrqTypes::default().with(IrqType::Intx))
+    })
+}
