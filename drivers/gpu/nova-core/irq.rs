@@ -11,6 +11,8 @@ use kernel::{
     prelude::*,
 };
 
+mod interrupt_tree;
+
 pub(crate) fn alloc_vector(pdev: &pci::Device<Bound>) -> Result<pci::IrqVectorRegistration<'_>> {
     let msi_types = IrqTypes::default().with(IrqType::Msi).with(IrqType::MsiX);
 
