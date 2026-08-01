@@ -27,7 +27,7 @@ use super::{
         Subtree,
         SubtreeSet, //
     },
-    regs,
+    regs::*,
     MsiType, //
 };
 
@@ -55,7 +55,7 @@ impl PciIrqRearmMethod {
     pub(super) fn rearm(self, bar: Bar0<'_>, serviced: SubtreeSet, subtree: Subtree) {
         let subtrees = match self {
             Self::ConfigMirrorEoi => {
-                bar.write(regs::NV_XVE_CYA_2, 0u32.into());
+                bar.write(NV_XVE_CYA_2, 0u32.into());
                 return;
             }
             Self::TopEnableCycleServiced => serviced,
@@ -63,10 +63,10 @@ impl PciIrqRearmMethod {
         };
 
         bar.write_reg(
-            regs::NV_VIRTUAL_FUNCTION_PRIV_CPU_INTR_TOP_EN_CLEAR::zeroed().with_subtrees(subtrees),
+            NV_VIRTUAL_FUNCTION_PRIV_CPU_INTR_TOP_EN_CLEAR::zeroed().with_subtrees(subtrees),
         );
         bar.write_reg(
-            regs::NV_VIRTUAL_FUNCTION_PRIV_CPU_INTR_TOP_EN_SET::zeroed().with_subtrees(subtrees),
+            NV_VIRTUAL_FUNCTION_PRIV_CPU_INTR_TOP_EN_SET::zeroed().with_subtrees(subtrees),
         );
     }
 }
