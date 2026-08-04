@@ -49,6 +49,7 @@ pub use self::io::{
     Normal, //
 };
 pub use self::irq::{
+    IrqAllocation,
     IrqType,
     IrqTypes,
     IrqVector, //
