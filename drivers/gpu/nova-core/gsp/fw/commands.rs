@@ -29,6 +29,7 @@ use crate::gsp::nvkv::{
     DecoderValue,
     Encodeable,
     Encoder,
+    Index,
     Key,
     KeyId,
     Required, //
@@ -426,6 +427,290 @@ struct FbRegion {
     tag: u32,
 }
 
+// vGPU related:
+
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) enum HypervisorType {
+    Xen = 0,
+    Vmware = 1,
+    HyperV = 2,
+    Kvm = 3,
+    Unknown = 4,
+}
+
+impl From<HypervisorType> for u32 {
+    fn from(value: HypervisorType) -> Self {
+        value as u32
+    }
+}
+
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) enum CpuArch {
+    X86_64 = 2,
+}
+
+impl From<CpuArch> for u32 {
+    fn from(value: CpuArch) -> Self {
+        value as u32
+    }
+}
+
+bitfield! {
+    pub(crate) struct Dbdf(u32) {
+        2:0 function;
+        7:3 device;
+        15:8 bus;
+        31:16 domain;
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SwizzId(pub(crate) u32);
+
+impl SwizzId {
+    pub(crate) const WHOLE_GPU: Self = Self(0xFFFF_FFFF);
+}
+
+impl Default for SwizzId {
+    fn default() -> Self {
+        Self::WHOLE_GPU
+    }
+}
+
+impl From<SwizzId> for u32 {
+    fn from(value: SwizzId) -> Self {
+        value.0
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct MigrationFeature(pub(crate) u32);
+
+#[cfg_attr(not(CONFIG_KUNIT), allow(dead_code))]
+impl MigrationFeature {
+    const KVM: Self = Self(0x4000);
+}
+
+impl From<MigrationFeature> for u32 {
+    fn from(value: MigrationFeature) -> Self {
+        value.0
+    }
+}
+
+bitfield! {
+    pub(crate) struct FeatureFlags(u64) {
+        3:3 enable_uvm => bool;
+        5:5 vmm_migration => bool;
+    }
+}
+
+bitfield! {
+    pub(crate) struct ChannelMapEntry(u64) {
+        15:0 engine_type;
+        31:16 index;
+        63:32 chid_offset;
+    }
+}
+
+impl ChannelMapEntry {
+    const KEY: KeyId = 0x1001;
+}
+
+impl Encodeable for KVVec<ChannelMapEntry> {
+    fn encode(&self, encoder: &mut Encoder) -> Result {
+        // SAFETY: `ChannelMapEntry` is a `bitfield!` over `u64`, i.e.
+        // `#[repr(transparent)]` around a `u64`, so the entries are
+        // layout-compatible with `u64` and can be viewed as a `u64` slice.
+        let slice = unsafe { core::slice::from_raw_parts(self.as_ptr().cast::<u64>(), self.len()) };
+        encoder.encode_array64(ChannelMapEntry::KEY, Index::new::<0>(), slice)
+    }
+}
+
+bitfield! {
+    pub(crate) struct VgpuBootloadOptions(u64) {
+    }
+}
+
+// VGPU_BOOTLOAD
+
+nvkv_encode! {
+    #[cfg_attr(not(CONFIG_KUNIT), allow(dead_code))]
+    struct VgpuBootloadRequest {
+        dbdf: Key<Dbdf, { Self::DBDF_KEY }, u32>,
+        gfid: Key<u32, { Self::GFID_KEY }>,
+        vgpu_type: Key<u32, { Self::VGPU_TYPE_KEY }>,
+        vm_pid: Key<u32, { Self::VM_PID_KEY }>,
+        swizz_id: Key<SwizzId, { Self::SWIZZ_ID_KEY }, u32>,
+        num_channels: Key<u32, { Self::NUM_CHANNELS_KEY }>,
+        num_plugin_channels: Key<u32, { Self::NUM_PLUGIN_CHANNELS_KEY }>,
+        guest_fb_segment_count: Key<u32, { Self::GUEST_FB_SEGMENT_COUNT_KEY }>,
+        options: Key<VgpuBootloadOptions, { Self::OPTIONS_KEY }, u64>,
+        channel_mapping: KVVec<ChannelMapEntry>,
+        guest_fb_segment_phys_addr: Array<u64, 8, { Self::GUEST_FB_SEGMENT_PHYS_ADDR_KEY }>,
+        guest_fb_segment_length: Array<u64, 8, { Self::GUEST_FB_SEGMENT_LENGTH_KEY }>,
+        plugin_heap_phys_addr: Key<u64, { Self::PLUGIN_HEAP_PHYS_ADDR_KEY }>,
+        plugin_heap_length: Key<u64, { Self::PLUGIN_HEAP_LENGTH_KEY }>,
+        ctrl_buff_offset: Key<u64, { Self::CTRL_BUFF_OFFSET_KEY }>,
+        init_task_log_offset: Key<u64, { Self::INIT_TASK_LOG_OFFSET_KEY }>,
+        init_task_log_size: Key<u64, { Self::INIT_TASK_LOG_SIZE_KEY }>,
+        vgpu_task_log_offset: Key<u64, { Self::VGPU_TASK_LOG_OFFSET_KEY }>,
+        vgpu_task_log_size: Key<u64, { Self::VGPU_TASK_LOG_SIZE_KEY }>,
+        kernel_log_offset: Key<u64, { Self::KERNEL_LOG_OFFSET_KEY }>,
+        kernel_log_size: Key<u64, { Self::KERNEL_LOG_SIZE_KEY }>,
+        mig_rm_heap_phys_addr: Key<u64, { Self::MIG_RM_HEAP_PHYS_ADDR_KEY }>,
+        mig_rm_heap_length: Key<u64, { Self::MIG_RM_HEAP_LENGTH_KEY }>,
+    }
+}
+
+#[cfg_attr(not(CONFIG_KUNIT), allow(dead_code))]
+impl VgpuBootloadRequest {
+    const DBDF_KEY: KeyId = 0x0001;
+    const GFID_KEY: KeyId = 0x0002;
+    const VGPU_TYPE_KEY: KeyId = 0x0003;
+    const VM_PID_KEY: KeyId = 0x0004;
+    const SWIZZ_ID_KEY: KeyId = 0x0005;
+    const NUM_CHANNELS_KEY: KeyId = 0x0006;
+    const NUM_PLUGIN_CHANNELS_KEY: KeyId = 0x0007;
+    const GUEST_FB_SEGMENT_COUNT_KEY: KeyId = 0x0008;
+    const OPTIONS_KEY: KeyId = 0x1000;
+    const GUEST_FB_SEGMENT_PHYS_ADDR_KEY: KeyId = 0x1002;
+    const GUEST_FB_SEGMENT_LENGTH_KEY: KeyId = 0x1003;
+    const PLUGIN_HEAP_PHYS_ADDR_KEY: KeyId = 0x1004;
+    const PLUGIN_HEAP_LENGTH_KEY: KeyId = 0x1005;
+    const CTRL_BUFF_OFFSET_KEY: KeyId = 0x1006;
+    const INIT_TASK_LOG_OFFSET_KEY: KeyId = 0x1007;
+    const INIT_TASK_LOG_SIZE_KEY: KeyId = 0x1008;
+    const VGPU_TASK_LOG_OFFSET_KEY: KeyId = 0x1009;
+    const VGPU_TASK_LOG_SIZE_KEY: KeyId = 0x100A;
+    const KERNEL_LOG_OFFSET_KEY: KeyId = 0x100B;
+    const KERNEL_LOG_SIZE_KEY: KeyId = 0x100C;
+    const MIG_RM_HEAP_PHYS_ADDR_KEY: KeyId = 0x100D;
+    const MIG_RM_HEAP_LENGTH_KEY: KeyId = 0x100E;
+}
+
+// VGPU_MGMT_QUERY_PROPERTIES
+
+nvkv_decode! {
+    #[derive(Default)]
+    struct VgpuPropertiesSchema => VgpuProperties {
+        // TODO: `name`/`class` required?
+        name: Array<u8, { VgpuProperties::STRING_LEN }, { Self::TYPE_NAME_KEY }>,
+        class: Array<u8, { VgpuProperties::STRING_LEN }, { Self::CLASS_KEY }>,
+        type_id: Required<u32, { Self::TYPE_ID_KEY }>,
+        bar1_length: Required<u64, { Self::BAR1_LENGTH_KEY }>,
+        max_instance: Required<u32, { Self::MAX_INSTANCE_KEY }>,
+        ecc: Key<u32, { Self::ECC_KEY }>,
+        profile_size: Required<u64, { Self::PROFILE_SIZE_KEY }>,
+        max_fps: Key<u32, { Self::MAX_FPS_KEY }>,
+        num_heads: Key<u32, { Self::NUM_HEADS_KEY }>,
+        max_res_x: Key<u32, { Self::MAX_RES_X_KEY }>,
+        max_res_y: Key<u32, { Self::MAX_RES_Y_KEY }>,
+        dev_id: Required<u32, { Self::DEV_ID_KEY }>,
+        subsystem_id: Required<u32, { Self::SUBSYSTEM_ID_KEY }>,
+        fb_length: Required<u64, { Self::FB_LENGTH_KEY }>,
+        gsp_heap_size: Required<u64, { Self::GSP_HEAP_SIZE_KEY }>,
+        fb_reservation: Required<u64, { Self::FB_RESERVATION_KEY }>,
+    }
+}
+
+impl VgpuPropertiesSchema {
+    const TYPE_NAME_KEY: KeyId = 0x3100;
+    const CLASS_KEY: KeyId = 0x3101;
+    const TYPE_ID_KEY: KeyId = 0x3102;
+    const BAR1_LENGTH_KEY: KeyId = 0x3103;
+    const MAX_INSTANCE_KEY: KeyId = 0x3104;
+    const ECC_KEY: KeyId = 0x3105;
+    const PROFILE_SIZE_KEY: KeyId = 0x3106;
+    const MAX_FPS_KEY: KeyId = 0x3107;
+    const NUM_HEADS_KEY: KeyId = 0x3108;
+    const MAX_RES_X_KEY: KeyId = 0x3109;
+    const MAX_RES_Y_KEY: KeyId = 0x310A;
+    const DEV_ID_KEY: KeyId = 0x310B;
+    const SUBSYSTEM_ID_KEY: KeyId = 0x310C;
+    const FB_LENGTH_KEY: KeyId = 0x310D;
+    const GSP_HEAP_SIZE_KEY: KeyId = 0x310E;
+    const FB_RESERVATION_KEY: KeyId = 0x310F;
+}
+
+struct VgpuProperties {
+    name: ArrayVec<u8, { Self::STRING_LEN }>,
+    class: ArrayVec<u8, { Self::STRING_LEN }>,
+    type_id: u32,
+    bar1_length: u64,
+    max_instance: u32,
+    ecc: u32,
+    profile_size: u64,
+    max_fps: u32,
+    num_heads: u32,
+    max_res_x: u32,
+    max_res_y: u32,
+    dev_id: u32,
+    subsystem_id: u32,
+    fb_length: u64,
+    gsp_heap_size: u64,
+    fb_reservation: u64,
+}
+
+impl VgpuProperties {
+    const STRING_LEN: usize = 64;
+}
+
+// SETUP_CONFIG_PARAMS_AND_INIT
+
+nvkv_encode! {
+    #[cfg_attr(not(CONFIG_KUNIT), allow(dead_code))]
+    struct PluginConfigParamsRequest {
+        uuid: Key<[u8; 16], { Self::UUID_KEY }>,
+        dbdf: Key<Dbdf, { Self::DBDF_KEY }, u32>,
+        dev_inst: Key<u32, { Self::DEV_INST_KEY }>,
+        vgpu_type: Key<u32, { Self::VGPU_TYPE_KEY }>,
+        vm_pid: Key<u32, { Self::VM_PID_KEY }>,
+        swizz_id: Key<SwizzId, { Self::SWIZZ_ID_KEY }, u32>,
+        num_channels: Key<u32, { Self::NUM_CHANNELS_KEY }>,
+        num_plugin_channels: Key<u32, { Self::NUM_PLUGIN_CHANNELS_KEY }>,
+        vmm_cap: Key<u32, { Self::VMM_CAP_KEY }>,
+        migration_feature: Key<MigrationFeature, { Self::MIGRATION_FEATURE_KEY }, u32>,
+        hypervisor_type: Key<HypervisorType, { Self::HYPERVISOR_TYPE_KEY }, u32>,
+        cpu_arch: Key<CpuArch, { Self::CPU_ARCH_KEY }, u32>,
+        page_size: Key<u64, { Self::PAGE_SIZE_KEY }>,
+        feature_flags: Key<FeatureFlags, { Self::FEATURE_FLAGS_KEY }, u64>,
+    }
+}
+
+#[cfg_attr(not(CONFIG_KUNIT), allow(dead_code))]
+impl PluginConfigParamsRequest {
+    const UUID_KEY: KeyId = 0x0001;
+    const DBDF_KEY: KeyId = 0x0002;
+    const DEV_INST_KEY: KeyId = 0x0004;
+    const VGPU_TYPE_KEY: KeyId = 0x0005;
+    const VM_PID_KEY: KeyId = 0x0006;
+    const SWIZZ_ID_KEY: KeyId = 0x0010;
+    const NUM_CHANNELS_KEY: KeyId = 0x0011;
+    const NUM_PLUGIN_CHANNELS_KEY: KeyId = 0x0012;
+    const VMM_CAP_KEY: KeyId = 0x0020;
+    const MIGRATION_FEATURE_KEY: KeyId = 0x0021;
+    const HYPERVISOR_TYPE_KEY: KeyId = 0x0022;
+    const CPU_ARCH_KEY: KeyId = 0x0023;
+    const PAGE_SIZE_KEY: KeyId = 0x0024;
+    const FEATURE_FLAGS_KEY: KeyId = 0x0030;
+}
+
+// UPDATE_BME_STATE
+
+nvkv_encode! {
+    #[cfg_attr(not(CONFIG_KUNIT), allow(dead_code))]
+    struct PluginSetBmeRequest {
+        bme_enable: Key<bool, { Self::BME_ENABLE_KEY }, u32>,
+    }
+}
+
+#[cfg_attr(not(CONFIG_KUNIT), allow(dead_code))]
+impl PluginSetBmeRequest {
+    const BME_ENABLE_KEY: KeyId = 0x0100;
+}
+
 #[kunit_tests(nova_core_fw_commands)]
 mod tests {
     use crate::gsp::nvkv::{
@@ -470,6 +755,193 @@ mod tests {
 
         gsp_init.encode(&mut encoder)?;
         let _encoded = encoder.finish();
+        Ok(())
+    }
+
+    #[test]
+    fn encode_vgpu_bootload_request() -> Result {
+        let mut encoder = Encoder::new();
+
+        let mut channel_mapping = KVVec::new();
+        channel_mapping.push(
+            ChannelMapEntry::zeroed().with_const_engine_type::<1>(),
+            GFP_KERNEL,
+        )?;
+        channel_mapping.push(
+            ChannelMapEntry::zeroed()
+                .with_const_engine_type::<2>()
+                .with_const_chid_offset::<8>(),
+            GFP_KERNEL,
+        )?;
+
+        let request = VgpuBootloadRequest {
+            dbdf: Dbdf::zeroed()
+                .with_const_domain::<1>()
+                .with_const_bus::<2>()
+                .with_const_device::<0>()
+                .with_const_function::<3>()
+                .into(),
+            gfid: 1.into(),
+            vgpu_type: 0x42.into(),
+            vm_pid: 1234.into(),
+            swizz_id: SwizzId(3).into(),
+            num_channels: 8.into(),
+            num_plugin_channels: 2.into(),
+            guest_fb_segment_count: 1.into(),
+            options: VgpuBootloadOptions::zeroed().into(),
+            channel_mapping,
+            guest_fb_segment_phys_addr: Array::new(&[0x1_0000_0000])?,
+            guest_fb_segment_length: Array::new(&[0x4000_0000])?,
+            plugin_heap_phys_addr: 0x2000_0000.into(),
+            plugin_heap_length: 0x10_0000.into(),
+            ctrl_buff_offset: 0.into(),
+            init_task_log_offset: 0x100.into(),
+            init_task_log_size: 0x200.into(),
+            vgpu_task_log_offset: 0x300.into(),
+            vgpu_task_log_size: 0x400.into(),
+            kernel_log_offset: 0x500.into(),
+            kernel_log_size: 0x600.into(),
+            mig_rm_heap_phys_addr: 0x3000_0000.into(),
+            mig_rm_heap_length: 0x40_0000.into(),
+        };
+
+        request.encode(&mut encoder)?;
+        let _encoded = encoder.finish();
+        Ok(())
+    }
+
+    #[test]
+    fn encode_plugin_config_params() -> Result {
+        let mut encoder = Encoder::new();
+
+        let request = PluginConfigParamsRequest {
+            uuid: [
+                0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+                0x77, 0x88,
+            ]
+            .into(),
+            dbdf: Dbdf::zeroed()
+                .with_const_domain::<1>()
+                .with_const_bus::<2>()
+                .with_const_device::<0>()
+                .with_const_function::<3>()
+                .into(),
+            dev_inst: 0.into(),
+            vgpu_type: 0x42.into(),
+            vm_pid: 1234.into(),
+            swizz_id: SwizzId(3).into(),
+            num_channels: 8.into(),
+            num_plugin_channels: 2.into(),
+            vmm_cap: 0.into(),
+            migration_feature: MigrationFeature::KVM.into(),
+            hypervisor_type: HypervisorType::Unknown.into(),
+            cpu_arch: CpuArch::X86_64.into(),
+            page_size: 4096.into(),
+            feature_flags: FeatureFlags::zeroed()
+                .with_enable_uvm(true)
+                .with_vmm_migration(true)
+                .into(),
+        };
+
+        request.encode(&mut encoder)?;
+        let _encoded = encoder.finish();
+        Ok(())
+    }
+
+    #[test]
+    fn encode_plugin_set_bme() -> Result {
+        let mut encoder = Encoder::new();
+
+        let request = PluginSetBmeRequest {
+            bme_enable: true.into(),
+        };
+
+        request.encode(&mut encoder)?;
+        let _encoded = encoder.finish();
+        Ok(())
+    }
+
+    #[test]
+    fn decode_vgpu_properties() -> Result {
+        let name = b"test name\0";
+        let class = b"test class\0";
+        const TYPE_ID: u32 = 0x42;
+        const BAR1_LENGTH: u64 = 0x1_0000_0000;
+        const MAX_INSTANCE: u32 = 4;
+        const ECC: u32 = 1;
+        const PROFILE_SIZE: u64 = 0x1_0000_0000;
+        const MAX_FPS: u32 = 60;
+        const NUM_HEADS: u32 = 4;
+        const MAX_RES_X: u32 = 7680;
+        const MAX_RES_Y: u32 = 4320;
+        const DEV_ID: u32 = 0x1db4;
+        const SUBSYSTEM_ID: u32 = 0x1234;
+        const FB_LENGTH: u64 = 0x1_0000_0000;
+        const GSP_HEAP_SIZE: u64 = 0x10_0000;
+        const FB_RESERVATION: u64 = 0x40_0000;
+
+        let index = Index::new::<0>();
+        let mut encoder = Encoder::new();
+        encoder.encode_array8(VgpuPropertiesSchema::TYPE_NAME_KEY, index, name)?;
+        encoder.encode_array8(VgpuPropertiesSchema::CLASS_KEY, index, class)?;
+        encoder.encode_u32(VgpuPropertiesSchema::TYPE_ID_KEY, index, TYPE_ID)?;
+        encoder.encode_u64(VgpuPropertiesSchema::BAR1_LENGTH_KEY, index, BAR1_LENGTH)?;
+        encoder.encode_u32(VgpuPropertiesSchema::MAX_INSTANCE_KEY, index, MAX_INSTANCE)?;
+        encoder.encode_u32(VgpuPropertiesSchema::ECC_KEY, index, ECC)?;
+        encoder.encode_u64(VgpuPropertiesSchema::PROFILE_SIZE_KEY, index, PROFILE_SIZE)?;
+        encoder.encode_u32(VgpuPropertiesSchema::MAX_FPS_KEY, index, MAX_FPS)?;
+        encoder.encode_u32(VgpuPropertiesSchema::NUM_HEADS_KEY, index, NUM_HEADS)?;
+        encoder.encode_u32(VgpuPropertiesSchema::MAX_RES_X_KEY, index, MAX_RES_X)?;
+        encoder.encode_u32(VgpuPropertiesSchema::MAX_RES_Y_KEY, index, MAX_RES_Y)?;
+        encoder.encode_u32(VgpuPropertiesSchema::DEV_ID_KEY, index, DEV_ID)?;
+        encoder.encode_u32(VgpuPropertiesSchema::SUBSYSTEM_ID_KEY, index, SUBSYSTEM_ID)?;
+        encoder.encode_u64(VgpuPropertiesSchema::FB_LENGTH_KEY, index, FB_LENGTH)?;
+        encoder.encode_u64(
+            VgpuPropertiesSchema::GSP_HEAP_SIZE_KEY,
+            index,
+            GSP_HEAP_SIZE,
+        )?;
+        encoder.encode_u64(
+            VgpuPropertiesSchema::FB_RESERVATION_KEY,
+            index,
+            FB_RESERVATION,
+        )?;
+        let data = encoder.finish();
+
+        let decoder = Decoder::new(&data, UnknownKeyPolicy::Ignore);
+        let props = KBox::try_init(decoder.decode(VgpuPropertiesSchema::default())?, GFP_KERNEL)?;
+
+        assert_eq!(&*props.name, &name[..]);
+        assert_eq!(&*props.class, &class[..]);
+        assert_eq!(props.type_id, TYPE_ID);
+        assert_eq!(props.bar1_length, BAR1_LENGTH);
+        assert_eq!(props.max_instance, MAX_INSTANCE);
+        assert_eq!(props.ecc, ECC);
+        assert_eq!(props.profile_size, PROFILE_SIZE);
+        assert_eq!(props.max_fps, MAX_FPS);
+        assert_eq!(props.num_heads, NUM_HEADS);
+        assert_eq!(props.max_res_x, MAX_RES_X);
+        assert_eq!(props.max_res_y, MAX_RES_Y);
+        assert_eq!(props.dev_id, DEV_ID);
+        assert_eq!(props.subsystem_id, SUBSYSTEM_ID);
+        assert_eq!(props.fb_length, FB_LENGTH);
+        assert_eq!(props.gsp_heap_size, GSP_HEAP_SIZE);
+        assert_eq!(props.fb_reservation, FB_RESERVATION);
+
+        Ok(())
+    }
+
+    #[test]
+    fn decode_vgpu_properties_missing_required_fails() -> Result {
+        let index = Index::new::<0>();
+        let mut encoder = Encoder::new();
+        encoder.encode_u32(VgpuPropertiesSchema::ECC_KEY, index, 1)?;
+        let data = encoder.finish();
+
+        let decoder = Decoder::new(&data, UnknownKeyPolicy::Ignore);
+        let init = decoder.decode(VgpuPropertiesSchema::default())?;
+        assert!(KBox::try_init(init, GFP_KERNEL).is_err());
+
         Ok(())
     }
 
