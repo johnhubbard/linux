@@ -119,4 +119,39 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn encode_typed_struct() -> Result {
+        const U32_KEY: KeyId = 0x0001;
+        const U64_KEY: KeyId = 0x0002;
+        const NAME_KEY: KeyId = 0x0003;
+        const FIXED_KEY: KeyId = 0x0004;
+        const OPT_KEY: KeyId = 0x0005;
+
+        nvkv_encode! {
+            struct TypedRequest {
+                a: Key<u32, { U32_KEY }>,
+                b: Key<u64, { U64_KEY }>,
+                name: Key<&'static [u8], { NAME_KEY }>,
+                fixed: Key<[u8; 4], { FIXED_KEY }>,
+                opt: Option<Key<u32, { OPT_KEY }>>,
+            }
+        }
+
+        let request = TypedRequest {
+            a: 0x89ab_cdef.into(),
+            b: 0x0123_4567_89ab_cdef.into(),
+            name: b"name\0".into(),
+            fixed: [1u8, 2, 3, 4].into(),
+            opt: None,
+        };
+
+        let mut encoder = Encoder::new();
+        request.encode(&mut encoder)?;
+        let encoded = encoder.finish();
+
+        assert_eq!(encoded.len(), 7);
+
+        Ok(())
+    }
 }
