@@ -6,6 +6,7 @@
 use kernel::prelude::*;
 
 use super::{
+    Array,
     EncodedStream,
     Index,
     Key,
@@ -142,6 +143,17 @@ where
     #[inline(always)]
     fn encode(&self, encoder: &mut Encoder) -> Result {
         IndexedKey::new(Index::new::<0>(), As::from(self.0)).encode(encoder)
+    }
+}
+
+impl<T, const N: usize, const KEY_ID: KeyId> Encodable for Array<T, N, KEY_ID>
+where
+    T: Default + Copy,
+    for<'a> IndexedKey<&'a [T], KEY_ID>: Encodable,
+{
+    #[inline(always)]
+    fn encode(&self, encoder: &mut Encoder) -> Result {
+        IndexedKey::<&[T], KEY_ID>::new(Index::new::<0>(), self.vec.as_slice()).encode(encoder)
     }
 }
 
