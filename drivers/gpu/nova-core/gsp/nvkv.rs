@@ -17,6 +17,9 @@ pub(crate) use encode::*;
 mod types;
 pub(crate) use types::*;
 
+mod decode;
+pub(crate) use decode::*;
+
 #[kunit_tests(nova_core_nvkv)]
 mod tests {
     use super::*;
@@ -49,6 +52,70 @@ mod tests {
             0xfedc_ba98_7654_3210,
         ];
         assert_eq!(&*encoded, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn decode_raw_schema() -> Result {
+        const SCALAR32_KEY: KeyId = 0x1234;
+        const SEQ32_KEY0: KeyId = 0x1237;
+        const SEQ32_KEY1: KeyId = 0x1238;
+
+        const SCALAR32_VALUE: u32 = 0x89ab_cdef;
+
+        #[derive(Default)]
+        struct RawSchema {
+            scalar32: u32,
+            seq32_0: u32,
+            seq32_1: u32,
+        }
+
+        impl Schema for RawSchema {
+            type Target = Self;
+
+            fn visit(&mut self, key: KeyId, index: Index, value: DecoderValue<'_>) -> Result<bool> {
+                // Stability: Single values being set must be at index 0.
+                if index != Index::new::<0>() {
+                    return Err(EINVAL);
+                }
+                match key {
+                    SCALAR32_KEY => self.scalar32 = value.try_into()?,
+                    SEQ32_KEY0 => self.seq32_0 = value.try_into()?,
+                    SEQ32_KEY1 => self.seq32_1 = value.try_into()?,
+                    _ => return Ok(false),
+                }
+                Ok(true)
+            }
+
+            fn finish(self) -> impl Init<Self::Target, Error> {
+                Ok(self)
+            }
+        }
+
+        let index = Index::new::<0>();
+        let mut encoder = Encoder::new();
+        encoder.encode_u32(SCALAR32_KEY, index, SCALAR32_VALUE)?;
+        let mut serialized = encoder.finish();
+        // A hand-built SEQ32 pair: count 2 at `SEQ32_KEY0`, one data word with both values.
+        serialized.push(0x0000_0002_1000_1237, GFP_KERNEL)?;
+        serialized.push(0x3333_4444_1111_2222, GFP_KERNEL)?;
+
+        let decoder = Decoder::new(&serialized, UnknownKeyPolicy::Error);
+        let decoded = KBox::try_init(decoder.decode(RawSchema::default())?, GFP_KERNEL)?;
+
+        assert_eq!(decoded.scalar32, SCALAR32_VALUE);
+        assert_eq!(decoded.seq32_0, 0x1111_2222);
+        assert_eq!(decoded.seq32_1, 0x3333_4444);
+
+        let mut encoder = Encoder::new();
+        encoder.encode_u32(0xffff, index, 1)?;
+        let serialized = encoder.finish();
+        let decoder = Decoder::new(&serialized, UnknownKeyPolicy::Error);
+        assert!(decoder.decode(RawSchema::default()).is_err());
+        let decoder = Decoder::new(&serialized, UnknownKeyPolicy::Ignore);
+        let decoded = KBox::try_init(decoder.decode(RawSchema::default())?, GFP_KERNEL)?;
+        assert_eq!(decoded.scalar32, 0);
 
         Ok(())
     }
