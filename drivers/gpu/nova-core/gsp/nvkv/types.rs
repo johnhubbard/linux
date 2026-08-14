@@ -112,6 +112,17 @@ pub(crate) struct Array<T: Default + Copy, const N: usize, const KEY_ID: KeyId>(
     pub(crate) ArrayVec<T, N>,
 );
 
+impl<T: Default + Copy, const N: usize, const KEY_ID: KeyId> Array<T, N, KEY_ID> {
+    /// Creates an array filled from `values`.
+    ///
+    /// Fails with `EINVAL` if `values` is longer than `N`.
+    pub(crate) fn new(values: &[T]) -> Result<Self> {
+        let mut data = ArrayVec::default();
+        data.set_from_slice(values)?;
+        Ok(Self(data))
+    }
+}
+
 bitfield! {
     /// The op word that starts each NVKV operation.
     pub(super) struct Op(u64) {

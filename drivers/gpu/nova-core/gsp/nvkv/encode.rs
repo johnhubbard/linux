@@ -4,6 +4,7 @@
 use kernel::prelude::*;
 
 use super::types::{
+    Array,
     Index,
     Key,
     KeyId,
@@ -128,6 +129,17 @@ where
     #[inline(always)]
     fn encode(&self, encoder: &mut Encoder) -> Result {
         IndexedKey::new(Index::new::<0>(), As::from(self.0)).encode(encoder)
+    }
+}
+
+impl<T, const N: usize, const KEY_ID: KeyId> Encodeable for Array<T, N, KEY_ID>
+where
+    T: Default + Copy,
+    for<'a> IndexedKey<&'a [T], KEY_ID>: Encodeable,
+{
+    #[inline(always)]
+    fn encode(&self, encoder: &mut Encoder) -> Result {
+        IndexedKey::<&[T], KEY_ID>::new(Index::new::<0>(), self.0.as_slice()).encode(encoder)
     }
 }
 
