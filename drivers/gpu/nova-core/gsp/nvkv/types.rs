@@ -54,6 +54,64 @@ impl<T: Default, const KEY_ID: KeyId, As> Default for Key<T, KEY_ID, As> {
     }
 }
 
+/// A fixed capacity vector that holds at most `N` elements.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Zeroable)]
+pub(crate) struct ArrayVec<T, const N: usize> {
+    data: [T; N],
+    len: usize,
+}
+
+impl<T, const N: usize> ArrayVec<T, N> {
+    /// Replaces the contents with a copy of `slice`.
+    ///
+    /// Fails with `EINVAL` if `slice` is longer than the capacity.
+    pub(crate) fn set_from_slice(&mut self, slice: &[T]) -> Result
+    where
+        T: Copy,
+    {
+        let Some(dst) = self.data.get_mut(..slice.len()) else {
+            return Err(EINVAL);
+        };
+
+        dst.copy_from_slice(slice);
+        self.len = slice.len();
+
+        Ok(())
+    }
+
+    /// Returns the initialized elements as a slice.
+    #[inline]
+    pub(crate) fn as_slice(&self) -> &[T] {
+        // PANIC: `len` is bounded by `N`; all constructors and mutators maintain this invariant.
+        &self.data[..self.len]
+    }
+}
+
+impl<T: Default + Copy, const N: usize> Default for ArrayVec<T, N> {
+    fn default() -> Self {
+        Self {
+            data: [T::default(); N],
+            len: 0,
+        }
+    }
+}
+
+impl<T, const N: usize> Deref for ArrayVec<T, N> {
+    type Target = [T];
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+/// A schema field for an array value under the NVKV key `KEY_ID`.
+#[derive(Default)]
+#[repr(transparent)]
+pub(crate) struct Array<T: Default + Copy, const N: usize, const KEY_ID: KeyId>(
+    pub(crate) ArrayVec<T, N>,
+);
+
 bitfield! {
     /// The op word that starts each NVKV operation.
     pub(super) struct Op(u64) {
