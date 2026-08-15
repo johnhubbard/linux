@@ -467,6 +467,146 @@ impl DmaGspMem {
     }
 }
 
+// Msgq v2 internals.
+//
+// Msgq v2 keeps the four ring pointers in BAR0 registers as monotonic `u32`
+// counters that wrap on overflow. The slot index is `ptr % MSGQ_NUM_PAGES`
+// only at the point of use, and the ring uses every slot (no "leave one
+// empty" rule, since `head == tail` distinguishes empty from full).
+//
+// Register-to-role mapping for queue 0:
+//
+//     CPU TX write/doorbell:  NV_PGSP_QUEUE_HEAD
+//     GSP TX read:            NV_PGSP_QUEUE_TAIL
+//     GSP RX write:           NV_PGSP_MSGQ_HEAD
+//     CPU RX read:            NV_PGSP_MSGQ_TAIL
+//
+// A GSP reset zeroes all four counters while the in-memory ring keeps its
+// contents, so the two ends can be out of step. Between the reset and
+// GSP-RM writing its counter back the read pointer is ahead of the write
+// pointer, which `driver_read_area_v2` reports as an empty ring.
+//
+// TODO: suspend/resume reset-recovery is not implemented. A power cycle
+// loses the driver-side counters as well, so both ends have to be
+// re-established.
+#[expect(dead_code)]
+impl DmaGspMem {
+    fn gsp_write_ptr_v2(bar: Bar0<'_>) -> u32 {
+        *bar.read(regs::NV_PGSP_MSGQ_HEAD).address()
+    }
+
+    fn gsp_read_ptr_v2(bar: Bar0<'_>) -> u32 {
+        *bar.read(regs::NV_PGSP_QUEUE_TAIL).address()
+    }
+
+    fn cpu_read_ptr_v2(bar: Bar0<'_>) -> u32 {
+        *bar.read(regs::NV_PGSP_MSGQ_TAIL).address()
+    }
+
+    fn cpu_write_ptr_v2(bar: Bar0<'_>) -> u32 {
+        *bar.read(regs::NV_PGSP_QUEUE_HEAD).address()
+    }
+
+    fn advance_cpu_read_ptr_v2(bar: Bar0<'_>, count: u32) {
+        let new_rptr = Self::cpu_read_ptr_v2(bar).wrapping_add(count);
+
+        // Order all reads from the message data ahead of the read-pointer
+        // update so the GSP cannot recycle the slots while we are still
+        // looking at them.
+        fence(Ordering::SeqCst);
+
+        bar.write_reg(regs::NV_PGSP_MSGQ_TAIL::zeroed().with_address(new_rptr));
+    }
+
+    fn advance_cpu_write_ptr_v2(bar: Bar0<'_>, count: u32) {
+        let new_wptr = Self::cpu_write_ptr_v2(bar).wrapping_add(count);
+
+        // Order all writes to the message data ahead of the write-pointer
+        // update. Writing the head register doubles as the GSP doorbell.
+        fence(Ordering::SeqCst);
+
+        bar.write_reg(regs::NV_PGSP_QUEUE_HEAD::zeroed().with_address(new_wptr));
+    }
+
+    /// Returns the region of the CPU message queue that the driver is currently allowed to write
+    /// to.
+    ///
+    /// As the message queue is a circular buffer, the region may be discontiguous in memory. In
+    /// that case the second slice will have a non-zero length.
+    fn driver_write_area_v2(
+        &mut self,
+        bar: Bar0<'_>,
+    ) -> (&mut [[u8; GSP_PAGE_SIZE]], &mut [[u8; GSP_PAGE_SIZE]]) {
+        let raw_w = Self::cpu_write_ptr_v2(bar);
+        let raw_r = Self::gsp_read_ptr_v2(bar);
+
+        let used = raw_w.wrapping_sub(raw_r);
+        let avail = num::u32_as_usize(MSGQ_NUM_PAGES.saturating_sub(used));
+        let w_slot = num::u32_as_usize(raw_w % MSGQ_NUM_PAGES);
+
+        // Pointer to the first entry of the CPU message queue.
+        let data = ptr::project!(mut self.0.as_mut_ptr(), .cpuq.msgq.data[build: 0]);
+
+        // SAFETY:
+        // - `data` points to `MSGQ_NUM_PAGES` valid message queue entries.
+        // - We will only access the driver-owned part of the shared memory.
+        // - Per the safety statement of the function, no concurrent access will be performed.
+        let data =
+            unsafe { core::slice::from_raw_parts_mut(data, num::u32_as_usize(MSGQ_NUM_PAGES)) };
+        let (before_w, after_w) = data.split_at_mut(w_slot);
+
+        let in_after = avail.min(after_w.len());
+        let in_before = avail - in_after;
+        (&mut after_w[..in_after], &mut before_w[..in_before])
+    }
+
+    /// Returns the size, in bytes, of the region of the CPU message queue that the driver is
+    /// currently allowed to write to.
+    fn driver_write_area_size_v2(bar: Bar0<'_>) -> usize {
+        let used = Self::cpu_write_ptr_v2(bar).wrapping_sub(Self::gsp_read_ptr_v2(bar));
+        let slots = MSGQ_NUM_PAGES.saturating_sub(used);
+        num::u32_as_usize(slots) * GSP_PAGE_SIZE
+    }
+
+    /// Returns the region of the GSP message queue that the driver is currently allowed to read
+    /// from.
+    ///
+    /// As the message queue is a circular buffer, the region may be discontiguous in memory. In
+    /// that case the second slice will have a non-zero length.
+    fn driver_read_area_v2(
+        &self,
+        bar: Bar0<'_>,
+    ) -> (&[[u8; GSP_PAGE_SIZE]], &[[u8; GSP_PAGE_SIZE]]) {
+        let raw_w = Self::gsp_write_ptr_v2(bar);
+        let raw_r = Self::cpu_read_ptr_v2(bar);
+
+        // A difference wider than the ring means the GSP has been reset and has not yet written
+        // its own counter back, so the read pointer is momentarily ahead of it. Report nothing
+        // readable, which holds the callers in their poll until GSP-RM restores the real value.
+        let pending = raw_w.wrapping_sub(raw_r);
+        let avail = if pending > MSGQ_NUM_PAGES {
+            0
+        } else {
+            num::u32_as_usize(pending)
+        };
+        let r_slot = num::u32_as_usize(raw_r % MSGQ_NUM_PAGES);
+
+        // Pointer to the first entry of the GSP message queue.
+        let data = ptr::project!(self.0.as_ptr(), .gspq.msgq.data[build: 0]);
+
+        // SAFETY:
+        // - `data` points to `MSGQ_NUM_PAGES` valid message queue entries.
+        // - We will only access the driver-owned part of the shared memory.
+        // - Per the safety statement of the function, no concurrent access will be performed.
+        let data = unsafe { core::slice::from_raw_parts(data, num::u32_as_usize(MSGQ_NUM_PAGES)) };
+        let (before_r, after_r) = data.split_at(r_slot);
+
+        let in_after = avail.min(after_r.len());
+        let in_before = avail - in_after;
+        (&after_r[..in_after], &before_r[..in_before])
+    }
+}
+
 /// A command ready to be sent on the command queue.
 ///
 /// This is the type returned by [`DmaGspMem::allocate_command`].
