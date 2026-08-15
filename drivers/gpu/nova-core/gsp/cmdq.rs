@@ -365,6 +365,8 @@ impl DmaGspMem {
     /// Allocates a region on the command queue that is large enough to send a command of `size`
     /// bytes, waiting for space to become available based on the provided timeout.
     ///
+    /// The type parameter `H` selects the message element header, [`GspMsgElement`] for RM RPC.
+    ///
     /// This returns a [`GspCommand`] ready to be written to by the caller.
     ///
     /// # Errors
@@ -372,13 +374,17 @@ impl DmaGspMem {
     /// - `EMSGSIZE` if the command is larger than [`GSP_MSG_QUEUE_ELEMENT_SIZE_MAX`].
     /// - `ETIMEDOUT` if space does not become available within the timeout.
     /// - `EIO` if the command header is not properly aligned.
-    fn allocate_command(&mut self, size: usize, timeout: Delta) -> Result<GspCommand<'_>> {
-        if size_of::<GspMsgElement>() + size > GSP_MSG_QUEUE_ELEMENT_SIZE_MAX {
+    fn allocate_command<H: FromBytes + AsBytes>(
+        &mut self,
+        size: usize,
+        timeout: Delta,
+    ) -> Result<GspCommand<'_, H>> {
+        if size_of::<H>() + size > GSP_MSG_QUEUE_ELEMENT_SIZE_MAX {
             return Err(EMSGSIZE);
         }
         read_poll_timeout(
             || Ok(self.driver_write_area_size()),
-            |available_bytes| *available_bytes >= size_of::<GspMsgElement>() + size,
+            |available_bytes| *available_bytes >= size_of::<H>() + size,
             Delta::from_micros(1),
             timeout,
         )?;
@@ -390,8 +396,8 @@ impl DmaGspMem {
             (slice_1.as_flattened_mut(), slice_2.as_flattened_mut())
         };
 
-        // Extract area for the `GspMsgElement`.
-        let (header, slice_1) = GspMsgElement::from_bytes_mut_prefix(slice_1).ok_or(EIO)?;
+        // Extract area for the message element header.
+        let (header, slice_1) = H::from_bytes_mut_prefix(slice_1).ok_or(EIO)?;
 
         // Create the contents area.
         let (slice_1, slice_2) = if slice_1.len() > size {
@@ -609,10 +615,12 @@ impl DmaGspMem {
 
 /// A command ready to be sent on the command queue.
 ///
+/// The type parameter `H` is the message element header type, [`GspMsgElement`] for RM RPC.
+///
 /// This is the type returned by [`DmaGspMem::allocate_command`].
-struct GspCommand<'a> {
+struct GspCommand<'a, H = GspMsgElement> {
     // Writable reference to the header of the command.
-    header: &'a mut GspMsgElement,
+    header: &'a mut H,
     // Writable slices to the contents of the command. The second slice is zero unless the command
     // loops over the command queue.
     contents: (&'a mut [u8], &'a mut [u8]),
