@@ -2,23 +2,229 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 use kernel::{
-    io::poll::read_poll_timeout,
+    device,
+    io::{
+        poll::read_poll_timeout,
+        register::Array,
+        Io, //
+    },
     prelude::*,
     time::Delta,
+    transmute::{
+        AsBytes,
+        FromBytes, //
+    },
     types::ScopeGuard, //
 };
 
 use crate::{
     falcon::{
         gsp::Gsp,
-        Falcon, //
+        sec2::Sec2,
+        Falcon,
+        FalconDmaSrcOffset,
+        FalconFbifEngineIdFlag,
+        FalconFbifMemType,
+        FalconFbifTarget,
+        FalconMem,
+        FalconModSelAlgo,
+        FLCN_ERR_BINARY_NOT_STARTED, //
     },
     firmware::gsp::GspFirmware,
     gsp::{
         cmdq::Cmdq,
         commands, //
     },
+    regs,
+    sbuffer::SBufferIter, //
 };
+
+/// The falcons, device and boot parameters that the load-and-execute event handlers share.
+struct LoadExecContext<'a, 'gpu> {
+    gsp_falcon: &'a Falcon<'gpu, Gsp>,
+    sec2_falcon: &'a Falcon<'gpu, Sec2>,
+    dev: &'a device::Device,
+    /// GSP bootloader application version.
+    bootloader_app_version: u32,
+    /// DMA address of the LIBOS init arguments.
+    libos_dma_handle: u64,
+}
+
+impl LoadExecContext<'_, '_> {
+    /// Waits until GSP-RM has suspended the RISC-V core, then resets the GSP falcon and its DMA
+    /// registers.
+    ///
+    /// # Errors
+    ///
+    /// - `ETIMEDOUT` if the core has not suspended within two seconds.
+    ///
+    /// Errors from the falcon reset are propagated as-is.
+    fn reset_gsp_falcon_after_suspend(&self) -> Result {
+        let Self {
+            gsp_falcon, dev, ..
+        } = *self;
+
+        gsp_falcon.wait_for_processor_suspend().inspect_err(|_| {
+            dev_err!(
+                dev,
+                "Timeout waiting for GSP suspend (mbox0={:#x})\n",
+                gsp_falcon.read_mailbox0()
+            );
+        })?;
+
+        gsp_falcon.reset()?;
+        gsp_falcon.dma_reset();
+
+        Ok(())
+    }
+
+    /// Runs the core resume, in which SEC2 restarts GSP-RM after a load-and-execute binary has
+    /// halted on the GSP falcon.
+    ///
+    /// # Errors
+    ///
+    /// - `EIO` if SEC2 reports a failure, or if the GSP is not running RISC-V afterwards.
+    /// - `ETIMEDOUT` if SEC2 does not complete the reload within two seconds.
+    fn core_resume(&self) -> Result {
+        let Self {
+            gsp_falcon,
+            sec2_falcon,
+            dev,
+            ..
+        } = *self;
+
+        gsp_falcon.reset()?;
+
+        gsp_falcon.write_mailboxes(
+            Some(self.libos_dma_handle as u32),
+            Some((self.libos_dma_handle >> 32) as u32),
+        );
+
+        sec2_falcon.start()?;
+
+        gsp_falcon
+            .check_reload_completed(Delta::from_secs(2))
+            .inspect_err(|_| {
+                let mbox0 = sec2_falcon.read_mailbox0();
+                dev_err!(
+                    dev,
+                    "Timeout waiting for SEC2 to resume GSP-RM (SEC2 mbox0={:#x})\n",
+                    mbox0
+                );
+            })?;
+
+        let sec2_mbox0 = sec2_falcon.read_mailbox0();
+        if sec2_mbox0 != 0 {
+            dev_err!(
+                dev,
+                "SEC2 reported error during core resume: {:#x}\n",
+                sec2_mbox0
+            );
+            return Err(EIO);
+        }
+
+        gsp_falcon.write_os_version(self.bootloader_app_version);
+
+        if !gsp_falcon.is_riscv_active() {
+            dev_err!(dev, "GSP RISC-V not active after core resume\n");
+            return Err(EIO);
+        }
+
+        Ok(())
+    }
+
+    /// Runs a Heavy-Secured (HS) binary on the GSP falcon, as a `GMCAPI_CMD_EXEC_HS_BINARY` event
+    /// requests, and then restarts GSP-RM.
+    ///
+    /// GSP-RM has placed the binary in the framebuffer, and the falcon's boot ROM (BROM) verifies
+    /// the binary's signature before the binary runs.
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` if the payload is shorter than the parameter block, or the ucode id does not
+    ///   fit the BROM register field.
+    /// - `ETIMEDOUT` if the RISC-V core does not suspend within two seconds, or the GSP falcon does
+    ///   not halt within two seconds of starting the binary.
+    ///
+    /// Errors from [`Self::core_resume`] are propagated as-is.
+    #[expect(dead_code)]
+    fn handle_load_exec_hs_binary(&self, payload_0: &[u8], payload_1: &[u8]) -> Result {
+        let Self {
+            gsp_falcon, dev, ..
+        } = *self;
+        let params = read_params::<HsBinaryParams>(payload_0, payload_1)?;
+
+        self.reset_gsp_falcon_after_suspend()?;
+
+        gsp_falcon.with_fbif_transcfg(
+            HsBinaryParams::CTX_DMA,
+            |v| {
+                v.with_target(FalconFbifTarget::LocalFb)
+                    .with_mem_type(FalconFbifMemType::Physical)
+                    .with_engine_id_flag(FalconFbifEngineIdFlag::Bar2Fn0)
+            },
+            || {
+                if params.ucode_imem_size > 0 {
+                    gsp_falcon.raw_dma_transfer(
+                        HsBinaryParams::CTX_DMA,
+                        params.imem_phys_addr,
+                        FalconMem::ImemSecure,
+                        FalconDmaSrcOffset::Va(params.ucode_imem_va),
+                        params.ucode_imem_pa,
+                        params.ucode_imem_size,
+                    )?;
+                }
+
+                if params.ucode_dmem_size > 0 {
+                    gsp_falcon.raw_dma_transfer(
+                        HsBinaryParams::CTX_DMA,
+                        params.dmem_phys_addr,
+                        FalconMem::Dmem,
+                        FalconDmaSrcOffset::from_dmem_va(params.ucode_dmem_va),
+                        params.ucode_dmem_pa,
+                        params.ucode_dmem_size,
+                    )?;
+                }
+
+                gsp_falcon.pfalcon2.write(
+                    Array::at(0),
+                    regs::NV_PFALCON2_FALCON_BROM_PARAADDR::zeroed()
+                        .with_value(params.hs_sig_dmem_addr),
+                );
+                gsp_falcon.pfalcon2.write_reg(
+                    regs::NV_PFALCON2_FALCON_BROM_ENGIDMASK::zeroed()
+                        .with_value(params.engine_id_mask),
+                );
+                gsp_falcon.pfalcon2.write_reg(
+                    regs::NV_PFALCON2_FALCON_BROM_CURR_UCODE_ID::zeroed()
+                        .with_ucode_id(u8::try_from(params.ucode_id).map_err(|_| EINVAL)?),
+                );
+                gsp_falcon.pfalcon2.write_reg(
+                    regs::NV_PFALCON2_FALCON_MOD_SEL::zeroed().with_algo(FalconModSelAlgo::Rsa3k),
+                );
+
+                gsp_falcon.pfalcon.write_reg(
+                    regs::NV_PFALCON_FALCON_BOOTVEC::zeroed().with_value(params.ucode_imem_va),
+                );
+
+                let (mbox0, _) = gsp_falcon
+                    .boot(Some(FLCN_ERR_BINARY_NOT_STARTED), None)
+                    .inspect_err(|_| {
+                        dev_err!(
+                            dev,
+                            "Timeout waiting for HS binary to halt (mbox0={:#x})\n",
+                            gsp_falcon.read_mailbox0()
+                        );
+                    })?;
+                dev_dbg!(dev, "HS binary halted with mbox0={:#x}\n", mbox0);
+
+                Ok(())
+            },
+        )?;
+
+        self.core_resume()
+    }
+}
 
 impl<'gsp> super::Gsp<'gsp> {
     /// Attempt to boot the GSP.
@@ -140,3 +346,50 @@ impl<'gsp> super::Gsp<'gsp> {
         res.inspect(|()| dev_info!(dev, "GSP successfully unloaded\n"))
     }
 }
+
+/// Reads the parameter block of type `T` from the start of an event payload, which the ring may
+/// have split in two.
+///
+/// # Errors
+///
+/// - `EINVAL` if the payload is shorter than `T`.
+fn read_params<T: FromBytes + AsBytes + Zeroable>(payload_0: &[u8], payload_1: &[u8]) -> Result<T> {
+    let mut params = T::zeroed();
+
+    SBufferIter::new_reader([payload_0, payload_1]).read_exact(params.as_bytes_mut())?;
+
+    Ok(params)
+}
+
+/// Payload of a `GMCAPI_CMD_EXEC_HS_BINARY` event.
+///
+/// GSP-RM has written the code to `imem_phys_addr` and the data to `dmem_phys_addr` in the
+/// framebuffer before it sends the event.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Zeroable)]
+struct HsBinaryParams {
+    imem_phys_addr: u64,
+    dmem_phys_addr: u64,
+    _reserved64: [u64; 2],
+    ucode_imem_va: u32,
+    ucode_imem_pa: u32,
+    ucode_imem_size: u32,
+    ucode_dmem_va: u32,
+    ucode_dmem_pa: u32,
+    ucode_dmem_size: u32,
+    hs_sig_dmem_addr: u32,
+    engine_id_mask: u32,
+    ucode_id: u32,
+    _reserved32: [u32; 3],
+}
+
+impl HsBinaryParams {
+    /// Context DMA slot through which the binary is loaded.
+    const CTX_DMA: u32 = 0;
+}
+
+// SAFETY: This struct only contains integer types for which all bit patterns are valid.
+unsafe impl FromBytes for HsBinaryParams {}
+
+// SAFETY: This struct only contains integer types, laid out without padding.
+unsafe impl AsBytes for HsBinaryParams {}
