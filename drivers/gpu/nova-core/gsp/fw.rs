@@ -955,6 +955,39 @@ unsafe impl FromBytes for GspMsgElement {}
 /// Magic value that opens every MCTP-framed queue element: `"MCTP"` in ASCII.
 const MCTP_MAGIC: u32 = 0x4D43_5450;
 
+/// Validates the MCTP and NVDM framing that opens an MCTP-framed queue element.
+///
+/// `element_size` is the size of the decoded element header, and is the smallest length a
+/// well-formed element can declare.
+///
+/// # Errors
+///
+/// - `EIO` if the magic, the MCTP version or the NVIDIA vendor id is wrong, or if the declared
+///   element length lies outside `element_size..=GSP_MSG_QUEUE_ELEMENT_SIZE_MAX`. The caller
+///   must treat every one of these as leaving the whole element untrusted, its length fields
+///   included.
+fn validate_mctp_framing(
+    magic: u32,
+    mctp_payload_size: u32,
+    mctp_header: MctpHeader,
+    nvdm_header: NvdmHeader,
+    element_size: usize,
+) -> Result {
+    if magic != MCTP_MAGIC
+        || !mctp_header.has_expected_version()
+        || !nvdm_header.has_nvidia_vendor()
+    {
+        return Err(EIO);
+    }
+
+    let length = num::u32_as_usize(mctp_payload_size);
+    if length < element_size || length > GSP_MSG_QUEUE_ELEMENT_SIZE_MAX {
+        return Err(EIO);
+    }
+
+    Ok(())
+}
+
 /// GMC API message header.
 ///
 /// Matches the `GMCAPI_HEADER` struct from Open RM. The `command` field carries
@@ -1075,9 +1108,30 @@ impl GspGmcMsgElement {
         })
     }
 
+    /// Returns the length of the response payload (data after the [`GmcApiHeader`]).
+    pub(crate) fn payload_length(&self) -> usize {
+        num::u32_as_usize(self.nvdm_payload_size).saturating_sub(size_of::<GmcApiHeader>())
+    }
+
     /// Returns the total length of the message, transport and GMC headers included.
     pub(crate) fn length(&self) -> usize {
         num::u32_as_usize(self.mctp_payload_size)
+    }
+
+    /// Validates the transport framing, before any length field in the element is trusted.
+    ///
+    /// # Errors
+    ///
+    /// - `EIO` if the MCTP magic, the MCTP version, the NVDM vendor id, or the declared element
+    ///   length is not one this driver accepts.
+    pub(crate) fn validate_framing(&self) -> Result {
+        validate_mctp_framing(
+            self.mctp_magic,
+            self.mctp_payload_size,
+            self.mctp_header,
+            self.nvdm_header,
+            size_of::<Self>(),
+        )
     }
 
     /// Returns the number of elements (i.e. memory pages) used by this message.
