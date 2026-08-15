@@ -12,28 +12,36 @@ use kernel::{
         Alignable,
         Alignment, //
     },
-    transmute::AsBytes, //
+    transmute::{
+        AsBytes,
+        FromBytes, //
+    },
 };
 
 use crate::{
     falcon::{
         self,
-        FalconPioImemLoadTarget, //
+        gsp::Gsp,
+        FalconBromParams,
+        FalconFirmware,
+        FalconPioDmemLoadTarget,
+        FalconPioImemLoadTarget,
+        FalconPioLoadable, //
     },
     firmware::tlv::{
         request_tlv, //
         Tlv,
     },
     gpu::Chipset,
-    num::FromSafeCast, //
+    num::{
+        self,
+        FromSafeCast, //
+    },
 };
 
-/// Structure used by the boot-loader to load the rest of the code.
-///
-/// This has to be filled by the GPU driver and copied into DMEM at offset
-/// [`BootloaderDesc.dmem_load_off`].
+/// Descriptor that the generic bootloader reads from DMEM offset 0 to find the image to load.
 #[repr(C, packed)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Zeroable)]
 pub(crate) struct BootloaderDmemDescV2 {
     /// Reserved, should always be first element.
     pub(crate) reserved: [u32; 4],
@@ -72,8 +80,17 @@ pub(crate) struct BootloaderDmemDescV2 {
     /// Arguments to be passed to the target firmware being loaded.
     pub(crate) argv: u32,
 }
+
+impl BootloaderDmemDescV2 {
+    /// Size of the descriptor in bytes, as the load-and-execute event states it.
+    pub(crate) const SIZE: u32 = num::usize_into_u32::<{ size_of::<BootloaderDmemDescV2>() }>();
+}
+
 // SAFETY: This struct doesn't contain uninitialized bytes and doesn't have interior mutability.
 unsafe impl AsBytes for BootloaderDmemDescV2 {}
+
+// SAFETY: This struct only contains integer types for which all bit patterns are valid.
+unsafe impl FromBytes for BootloaderDmemDescV2 {}
 
 /// The generic falcon bootloader image and its IMEM load parameters.
 pub(crate) struct GenericBootloader {
@@ -142,6 +159,58 @@ impl GenericBootloader {
             dst_start: self.imem_dst_start,
             secure: false,
             start_tag: self.start_tag,
+        }
+    }
+
+    /// Returns the bootloader and `descriptor` as one firmware that [`Falcon::pio_load`] accepts.
+    pub(crate) fn with_descriptor<'a>(
+        &'a self,
+        dmem_desc: &'a BootloaderDmemDescV2,
+    ) -> GenericBootloaderLoad<'a> {
+        GenericBootloaderLoad {
+            bootloader: self,
+            dmem_desc,
+        }
+    }
+}
+
+/// The generic bootloader together with the descriptor that it reads from DMEM offset 0.
+pub(crate) struct GenericBootloaderLoad<'a> {
+    bootloader: &'a GenericBootloader,
+    dmem_desc: &'a BootloaderDmemDescV2,
+}
+
+impl FalconFirmware for GenericBootloaderLoad<'_> {
+    type Target = Gsp;
+
+    fn brom_params(&self) -> FalconBromParams {
+        // The bootloader is unsigned, and the falcon HALs of the chipsets that load it this way
+        // write no BROM registers, so these values never reach hardware.
+        FalconBromParams {
+            pkc_data_offset: 0,
+            engine_id_mask: 0,
+            ucode_id: 0,
+        }
+    }
+
+    fn boot_addr(&self) -> u32 {
+        self.bootloader.boot_addr()
+    }
+}
+
+impl FalconPioLoadable for GenericBootloaderLoad<'_> {
+    fn imem_sec_load_params(&self) -> Option<FalconPioImemLoadTarget<'_>> {
+        None
+    }
+
+    fn imem_ns_load_params(&self) -> Option<FalconPioImemLoadTarget<'_>> {
+        Some(self.bootloader.imem_load_params())
+    }
+
+    fn dmem_load_params(&self) -> FalconPioDmemLoadTarget<'_> {
+        FalconPioDmemLoadTarget {
+            data: self.dmem_desc.as_bytes(),
+            dst_start: 0,
         }
     }
 }
