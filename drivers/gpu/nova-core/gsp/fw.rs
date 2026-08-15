@@ -1021,6 +1021,10 @@ pub(crate) struct GmcApiHeader {
 /// Bits of [`GmcApiHeader::command`] that hold the command id. The high byte holds flags.
 const GMCAPI_COMMAND_ID_MASK: u32 = 0x00ff_ffff;
 
+/// GMC request that hands GSP-RM its system information and registry keys. GSP-RM answers it
+/// with the static GPU configuration once it has finished starting.
+pub(crate) const GMCAPI_CMD_GSP_INIT: u32 = r000_00::GMCAPI_COMMANDS_GMCAPI_CMD_GSP_INIT;
+
 /// GMC event asking the driver to run the generic falcon bootloader against a descriptor that
 /// GSP-RM supplies.
 pub(crate) const GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER: u32 =

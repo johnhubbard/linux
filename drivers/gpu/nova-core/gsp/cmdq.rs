@@ -635,19 +635,37 @@ impl<'cmdq> Cmdq<'cmdq> {
         self.inner.lock().send_command(command)
     }
 
-    /// Receives one GMC event and passes its command id and payload slices to `handler`.
+    /// Receives one GMC element and passes its GMC header fields and its payload slices to
+    /// `handler`.
     ///
     /// This method may sleep while waiting. The queue mutex stays locked across the wait and the
     /// `handler` call, so `handler` must not call back into this [`Cmdq`].
     ///
     /// See [`CmdqInner::receive_gmc_and_dispatch`] for the return value and the errors.
-    #[expect(dead_code)]
     pub(crate) fn receive_gmc_and_dispatch<R>(
         &self,
         timeout: Delta,
-        handler: impl FnOnce(u32, &[u8], &[u8]) -> Option<R>,
+        handler: impl FnOnce(u32, u32, &[u8], &[u8]) -> Option<R>,
     ) -> Result<Option<R>> {
         self.inner.lock().receive_gmc_and_dispatch(timeout, handler)
+    }
+
+    /// Sends a GMC API request to the GSP without waiting for the response.
+    ///
+    /// # Errors
+    ///
+    /// - `EMSGSIZE` if the request exceeds the maximum queue element size.
+    /// - `ETIMEDOUT` if queue space does not become available within the timeout.
+    /// - `EIO` if the element header is not properly aligned.
+    pub(crate) fn send_gmc_no_wait(
+        &self,
+        command_id: u32,
+        payload: &[u8],
+        max_response_size: u32,
+    ) -> Result {
+        self.inner
+            .lock()
+            .send_gmc(command_id, payload, max_response_size)
     }
 
     /// Waits for an unsolicited GSP event of type `M`. Events that arrive before it are logged and
@@ -824,7 +842,6 @@ impl CmdqInner<'_> {
     /// - `EMSGSIZE` if the request exceeds the maximum queue element size.
     /// - `ETIMEDOUT` if queue space does not become available within the timeout.
     /// - `EIO` if the element header is not properly aligned.
-    #[expect(dead_code)]
     fn send_gmc(&mut self, command_id: u32, payload: &[u8], max_response_size: u32) -> Result {
         let seq = self.seq;
         self.seq = self.seq.wrapping_add(1);
@@ -1149,8 +1166,8 @@ impl CmdqInner<'_> {
         Ok(GmcMessage { header, contents })
     }
 
-    /// Receives the next queue element. If it is a GMC element, passes its command id and the
-    /// payload slices after the GMC header to `handler`, which returns `None` for an element it
+    /// Receives the next queue element. If it is a GMC element, passes its GMC header fields and
+    /// the payload slices after that header to `handler`, which returns `None` for an element it
     /// declines. The payload comes as two slices because the ring may wrap.
     ///
     /// Returns `Ok(None)` when nothing claimed the element, because it was not a GMC element or
@@ -1164,7 +1181,7 @@ impl CmdqInner<'_> {
     fn receive_gmc_and_dispatch<R>(
         &mut self,
         timeout: Delta,
-        handler: impl FnOnce(u32, &[u8], &[u8]) -> Option<R>,
+        handler: impl FnOnce(u32, u32, &[u8], &[u8]) -> Option<R>,
     ) -> Result<Option<R>> {
         let message = self.wait_for_gmc_msg(timeout)?;
         let header = message.header;
@@ -1194,7 +1211,12 @@ impl CmdqInner<'_> {
                 header.length(),
             );
 
-            handler(command_id, message.contents.0, message.contents.1)
+            handler(
+                command_id,
+                header.gmc.max_resp_or_status,
+                message.contents.0,
+                message.contents.1,
+            )
         };
 
         self.gsp_mem.advance_cpu_read_ptr(element_count);
