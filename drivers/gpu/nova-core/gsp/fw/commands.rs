@@ -426,7 +426,7 @@ nvkv_decode! {
     /// Schema for the `GSP_INIT` response.
     #[cfg_attr(not(CONFIG_KUNIT), allow(dead_code))]
     #[derive(Default)]
-    struct GspInitResponseSchema => GspInitResponse {
+    pub(crate) struct GspInitResponseSchema => GspInitResponse {
         gpu_name:
             Array<u8, { GspInitResponse::MAX_GPU_NAME_LEN }, { Self::GPU_NAME_STRING_KEY }>,
         fb_regions: Accumulated<FbRegionSchema>,
@@ -444,7 +444,7 @@ impl GspInitResponseSchema {
 
 /// Payload of the `GSP_INIT` response.
 #[cfg_attr(not(CONFIG_KUNIT), allow(dead_code))]
-struct GspInitResponse {
+pub(crate) struct GspInitResponse {
     gpu_name: ArrayVec<u8, { Self::MAX_GPU_NAME_LEN }>,
     fb_regions: KVVec<FbRegion>,
     bar1_pde_base: u64,
@@ -452,7 +452,36 @@ struct GspInitResponse {
 }
 
 impl GspInitResponse {
-    const MAX_GPU_NAME_LEN: usize = 64;
+    pub(crate) const MAX_GPU_NAME_LEN: usize = 64;
+
+    /// A region with no tag is general-purpose memory. A tagged region is reserved for a
+    /// firmware-internal use that the tag identifies.
+    const FB_REGION_TAG_NONE: u32 = 0;
+
+    /// Returns the GPU name, which GSP-RM sends with its NULL terminator.
+    pub(crate) fn gpu_name(&self) -> &[u8] {
+        self.gpu_name.as_slice()
+    }
+
+    /// Iterates over the FB regions the driver may allocate from.
+    ///
+    /// A region qualifies when it is untagged, unprotected, and supports both compression and
+    /// isochronous access, which is the same set the RPC path selects from
+    /// [`GspStaticConfigInfo::usable_fb_regions`].
+    pub(crate) fn usable_fb_regions(&self) -> impl Iterator<Item = Range<u64>> + '_ {
+        self.fb_regions.iter().filter_map(|region| {
+            if region.limit >= region.base
+                && region.tag == Self::FB_REGION_TAG_NONE
+                && !region.flags.protected()
+                && region.flags.support_compressed()
+                && region.flags.support_iso()
+            {
+                region.limit.checked_add(1).map(|end| region.base..end)
+            } else {
+                None
+            }
+        })
+    }
 }
 
 nvkv_decode! {
