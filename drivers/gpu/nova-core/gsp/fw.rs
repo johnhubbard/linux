@@ -1079,6 +1079,9 @@ pub(crate) struct GmcApiHeader {
     reserved: [u32; 5],
 }
 
+/// Bits of [`GmcApiHeader::command`] that hold the command id. The high byte holds flags.
+const GMCAPI_COMMAND_ID_MASK: u32 = 0x00ff_ffff;
+
 static_assert!(size_of::<GmcApiHeader>() == size_of::<r000_00::GMCAPI_HEADER>());
 static_assert!(
     core::mem::offset_of!(GmcApiHeader, command)
@@ -1102,6 +1105,11 @@ static_assert!(
 );
 
 impl GmcApiHeader {
+    /// Returns the command id, without the flag byte.
+    pub(crate) fn command_id(&self) -> u32 {
+        self.command & GMCAPI_COMMAND_ID_MASK
+    }
+
     /// Returns the `NV_STATUS` that a response carries.
     ///
     /// The value is meaningful only on a response, which GSP-RM marks with a flag in the command
