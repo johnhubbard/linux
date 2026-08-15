@@ -790,20 +790,41 @@ impl Cmdq {
         self.inner.lock().receive_msg(timeout, None)
     }
 
-    /// Receives one GMC event from the GSP and passes its command id and raw payload slices to
-    /// `handler`.
+    /// Receives one GMC element from the GSP and passes its command id, the `max_resp_or_status`
+    /// field, and the raw payload slices to `handler`.
     ///
     /// This method may sleep while waiting. The [`CmdqInner`] mutex stays locked across the wait
     /// and across the `handler` call, so `handler` must not call back into this [`Cmdq`].
     ///
     /// See [`CmdqInner::receive_gmc_and_dispatch`] for return values, queue state, and errors.
-    #[expect(dead_code)]
     pub(crate) fn receive_gmc_and_dispatch<R>(
         &self,
         timeout: Delta,
-        handler: impl FnOnce(u32, &[u8], &[u8]) -> Option<R>,
+        handler: impl FnOnce(u32, u32, &[u8], &[u8]) -> Option<R>,
     ) -> Result<Option<R>> {
         self.inner.lock().receive_gmc_and_dispatch(timeout, handler)
+    }
+
+    /// Sends a GMC API command to the GSP without waiting for its response.
+    ///
+    /// A caller that expects a response reads it with [`Self::receive_gmc_and_dispatch`], which
+    /// lets it handle the events GSP-RM interleaves before the response arrives.
+    ///
+    /// # Errors
+    ///
+    /// - `EMSGSIZE` if the command exceeds the maximum queue element size.
+    /// - `ETIMEDOUT` if space does not become available within the timeout.
+    /// - `EIO` if the command header is not properly aligned.
+    pub(crate) fn send_gmc_no_wait(
+        &self,
+        bar: Bar0<'_>,
+        command_id: u32,
+        payload: &[u8],
+        max_response_size: u32,
+    ) -> Result {
+        self.inner
+            .lock()
+            .send_gmc(bar, command_id, payload, max_response_size)
     }
 
     /// Waits for an unsolicited GSP event of type `M`, dispatching any other event that arrives
@@ -1005,7 +1026,6 @@ impl CmdqInner {
     /// - `EMSGSIZE` if the command exceeds the maximum queue element size.
     /// - `ETIMEDOUT` if space does not become available within the timeout.
     /// - `EIO` if the command header is not properly aligned.
-    #[expect(dead_code)]
     fn send_gmc(
         &mut self,
         bar: Bar0<'_>,
@@ -1387,9 +1407,13 @@ impl CmdqInner {
 
     /// Receive the next GMC event from the GSP and dispatch it through a handler.
     ///
-    /// The handler receives the GMC command id and the raw payload slices that follow the
-    /// [`super::fw::GmcApiHeader`] (two slices because the circular buffer may wrap). It returns
-    /// `None` for an event it does not handle.
+    /// The handler receives the GMC command id, the header's `max_resp_or_status` field, and the
+    /// raw payload slices that follow the [`super::fw::GmcApiHeader`] (two slices because the
+    /// circular buffer may wrap). It returns `None` for an element it does not handle.
+    ///
+    /// `max_resp_or_status` is a union: GSP-RM writes an `NV_STATUS` there when the element is a
+    /// response, and the maximum response size when it is a request. Only a handler that knows
+    /// which one it asked for can read it.
     ///
     /// Where [`Self::receive_msg`] keys on [`MsgFunction`], this keys on the GMC command id,
     /// which is the form the r000 firmware uses for boot events.
@@ -1405,7 +1429,7 @@ impl CmdqInner {
     fn receive_gmc_and_dispatch<R>(
         &mut self,
         timeout: Delta,
-        handler: impl FnOnce(u32, &[u8], &[u8]) -> Option<R>,
+        handler: impl FnOnce(u32, u32, &[u8], &[u8]) -> Option<R>,
     ) -> Result<Option<R>> {
         let message = self.wait_for_gmc_msg(timeout)?;
         let header = message.header;
@@ -1437,7 +1461,12 @@ impl CmdqInner {
                 length,
             );
 
-            handler(command_id, message.contents.0, message.contents.1)
+            handler(
+                command_id,
+                header.gmc.max_resp_or_status,
+                message.contents.0,
+                message.contents.1,
+            )
         };
 
         self.gsp_mem

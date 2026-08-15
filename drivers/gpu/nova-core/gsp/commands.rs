@@ -20,6 +20,7 @@ use kernel::{
 };
 
 use crate::{
+    driver::Bar0,
     gpu::Chipset,
     gsp::{
         cmdq::{
@@ -32,13 +33,18 @@ use crate::{
             self,
             commands::{
                 GspInitRequest,
+                GspInitResponse,
+                GspInitResponseSchema,
                 RegKey, //
             },
-            MsgFunction, //
+            MsgFunction,
+            GMCAPI_CMD_GSP_INIT, //
         },
         nvkv::{
+            Decoder,
             Encodeable,
-            Encoder, //
+            Encoder,
+            UnknownKeyPolicy, //
         },
     },
     sbuffer::SBufferIter,
@@ -309,6 +315,136 @@ pub(crate) fn build_gsp_init_payload(
     GspInitRequest::new(pdev, chipset, regkeys).encode(&mut encoder)?;
 
     Ok(encoder.finish())
+}
+
+/// Size of the buffer GSP-RM may fill with static configuration, matching the allocation Open RM
+/// makes in `kgspSendInitRpcs`.
+const GSP_INIT_MAX_RESPONSE_SIZE: u32 = 48 * 1024;
+
+/// Sends `GSP_INIT` and returns the static configuration its reply carries.
+///
+/// GSP-RM interleaves load-and-execute events between the request and the reply, and those events
+/// drive the falcon loads that let it finish starting, so each one is passed to `on_boot_event`
+/// rather than skipped. The reply arrives only once GSP-RM is up, which is what makes it the
+/// signal that boot is complete.
+///
+/// `payload` is the blob from [`build_gsp_init_payload`].
+///
+/// # Errors
+///
+/// - `EIO` if GSP-RM reports a failure status, or if the reply is not a whole number of NVKV
+///   words.
+/// - `ETIMEDOUT` if neither the reply nor another element arrives within
+///   [`Cmdq::RECEIVE_TIMEOUT`].
+///
+/// Errors from `on_boot_event` and from decoding the reply are propagated as-is.
+#[expect(dead_code)]
+pub(crate) fn gsp_init(
+    cmdq: &Cmdq,
+    bar: Bar0<'_>,
+    payload: &[u64],
+    mut on_boot_event: impl FnMut(u32, &[u8]) -> Result,
+) -> Result<GetGspStaticInfoReply> {
+    // Qualified because `zerocopy::IntoBytes` also gives `[T]` an `as_bytes`.
+    let payload = AsBytes::as_bytes(payload);
+
+    cmdq.send_gmc_no_wait(
+        bar,
+        GMCAPI_CMD_GSP_INIT,
+        payload,
+        GSP_INIT_MAX_RESPONSE_SIZE,
+    )?;
+
+    loop {
+        let reply = cmdq.receive_gmc_and_dispatch(
+            Cmdq::RECEIVE_TIMEOUT,
+            |command_id, max_resp_or_status, payload_0, payload_1| {
+                if command_id == GMCAPI_CMD_GSP_INIT {
+                    Some(decode_gsp_init_reply(
+                        max_resp_or_status,
+                        payload_0,
+                        payload_1,
+                    ))
+                } else {
+                    // A boot event. Keep waiting for the reply unless handling it failed.
+                    match on_boot_event(command_id, payload_0) {
+                        Ok(()) => None,
+                        Err(e) => Some(Err(e)),
+                    }
+                }
+            },
+        )?;
+
+        if let Some(reply) = reply {
+            return reply;
+        }
+    }
+}
+
+/// Decodes the `GSP_INIT` reply, whose `max_resp_or_status` field carries an `NV_STATUS`.
+fn decode_gsp_init_reply(
+    status: u32,
+    payload_0: &[u8],
+    payload_1: &[u8],
+) -> Result<GetGspStaticInfoReply> {
+    if status != 0 {
+        return Err(EIO);
+    }
+
+    decode_gsp_info(&nvkv_words(payload_0, payload_1)?)
+}
+
+/// Joins the two halves of a wrapped payload into the `u64` words an NVKV stream is made of.
+///
+/// # Errors
+///
+/// - `EIO` if the combined length is not a whole number of words.
+/// - `ENOMEM` if the buffer cannot be allocated.
+fn nvkv_words(payload_0: &[u8], payload_1: &[u8]) -> Result<KVVec<u64>> {
+    let bytes = SBufferIter::new_reader([payload_0, payload_1]).flush_into_kvec(GFP_KERNEL)?;
+    let words = bytes.chunks_exact(size_of::<u64>());
+    if !words.remainder().is_empty() {
+        return Err(EIO);
+    }
+
+    let mut out = KVVec::with_capacity(bytes.len() / size_of::<u64>(), GFP_KERNEL)?;
+    for word in words {
+        let word: [u8; size_of::<u64>()] = word.try_into().map_err(|_| EIO)?;
+        out.push(u64::from_le_bytes(word), GFP_KERNEL)?;
+    }
+
+    Ok(out)
+}
+
+/// Decodes the static GPU configuration from an NVKV stream.
+///
+/// # Errors
+///
+/// - `EINVAL` if the stream is malformed or omits a required key.
+/// - `ENOMEM` if the decoded regions cannot be allocated.
+fn decode_gsp_info(words: &[u64]) -> Result<GetGspStaticInfoReply> {
+    let decoder = Decoder::new(words, UnknownKeyPolicy::Ignore);
+    let decoded = KBox::try_init(
+        decoder.decode(GspInitResponseSchema::default())?,
+        GFP_KERNEL,
+    )?;
+
+    let mut gpu_name = [0u8; GspInitResponse::MAX_GPU_NAME_LEN];
+    let name = decoded.gpu_name();
+    gpu_name
+        .get_mut(..name.len())
+        .ok_or(EINVAL)?
+        .copy_from_slice(name);
+
+    let mut usable_fb_regions = KVec::new();
+    for region in decoded.usable_fb_regions() {
+        usable_fb_regions.push(region, GFP_KERNEL)?;
+    }
+
+    Ok(GetGspStaticInfoReply {
+        gpu_name,
+        usable_fb_regions,
+    })
 }
 
 pub(crate) use fw::commands::PowerStateLevel;
