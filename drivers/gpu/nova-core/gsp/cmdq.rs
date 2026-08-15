@@ -512,6 +512,18 @@ struct GspMessage<'a> {
     contents: (&'a [u8], &'a [u8]),
 }
 
+/// A GMC message ready to be processed from the message queue.
+///
+/// This is the type returned by [`CmdqInner::wait_for_gmc_msg`].
+#[expect(dead_code)]
+struct GmcMessage<'a> {
+    // Reference to the headers of the message.
+    header: &'a GspGmcMsgElement,
+    // Slices to the payload that follows the GMC header. The second slice is empty unless the
+    // payload wraps around the end of the message queue.
+    contents: (&'a [u8], &'a [u8]),
+}
+
 /// GSP command queue.
 ///
 /// Provides the ability to send commands and receive messages from the GSP using a shared memory
@@ -877,29 +889,7 @@ impl CmdqInner<'_> {
             header.length(),
         );
 
-        let payload_length = header.payload_length();
-
-        // Check that the driver read area is large enough for the message.
-        if slice_1.len() + slice_2.len() < payload_length {
-            return Err(self.poison(fmt!(
-                "message advertises {} payload bytes but only {} are readable",
-                payload_length,
-                slice_1.len() + slice_2.len()
-            )));
-        }
-
-        // Cut the message slices down to the actual length of the message.
-        let (slice_1, slice_2) = if slice_1.len() > payload_length {
-            // PANIC: we checked above that `slice_1` is at least as long as `payload_length`.
-            (slice_1.split_at(payload_length).0, &slice_2[0..0])
-        } else {
-            (
-                slice_1,
-                // PANIC: we checked above that `slice_1.len() + slice_2.len()` is at least as
-                // large as `payload_length`.
-                slice_2.split_at(payload_length - slice_1.len()).0,
-            )
-        };
+        let (slice_1, slice_2) = self.payload_slices(slice_1, slice_2, header.payload_length())?;
 
         // Validate checksum.
         if Cmdq::calculate_checksum(SBufferIter::new_reader([
@@ -1067,5 +1057,82 @@ impl CmdqInner<'_> {
         }
 
         Ok(())
+    }
+
+    /// Cuts the read area that follows a message header down to the `payload_length` bytes the
+    /// header declares.
+    ///
+    /// # Errors
+    ///
+    /// - `EIO` if fewer bytes than that are readable, which poisons the queue.
+    fn payload_slices<'a>(
+        &self,
+        slice_1: &'a [u8],
+        slice_2: &'a [u8],
+        payload_length: usize,
+    ) -> Result<(&'a [u8], &'a [u8])> {
+        if slice_1.len() + slice_2.len() < payload_length {
+            return Err(self.poison(fmt!(
+                "message advertises {} payload bytes but only {} are readable",
+                payload_length,
+                slice_1.len() + slice_2.len()
+            )));
+        }
+
+        Ok(if slice_1.len() > payload_length {
+            // PANIC: we checked above that `slice_1` is at least as long as `payload_length`.
+            (slice_1.split_at(payload_length).0, &slice_2[0..0])
+        } else {
+            (
+                slice_1,
+                // PANIC: we checked above that `slice_1.len() + slice_2.len()` is at least as
+                // large as `payload_length`.
+                slice_2.split_at(payload_length - slice_1.len()).0,
+            )
+        })
+    }
+
+    /// Waits for the next queue element and returns it as a GMC message.
+    ///
+    /// Only the transport headers are validated. The element is returned even when its NVDM type
+    /// names another kind of message, so a caller that may receive other kinds checks the type
+    /// before reading the GMC header.
+    ///
+    /// # Errors
+    ///
+    /// - `ETIMEDOUT` if no element arrives within `timeout`.
+    /// - `EIO` if the queue is already poisoned, or if the framing is invalid, which poisons it
+    ///   (see [`Self::poisoned`]).
+    #[expect(dead_code)]
+    fn wait_for_gmc_msg(&self, timeout: Delta) -> Result<GmcMessage<'_>> {
+        if self.poisoned.get() {
+            return Err(EIO);
+        }
+
+        let (slice_1, slice_2) = read_poll_timeout(
+            || Ok(self.gsp_mem.driver_read_area()),
+            |driver_area| !driver_area.0.is_empty(),
+            Delta::from_millis(1),
+            timeout,
+        )
+        .map(|(slice_1, slice_2)| (slice_1.as_flattened(), slice_2.as_flattened()))?;
+
+        let Some((header, slice_1)) = GspGmcMsgElement::from_bytes_prefix(slice_1) else {
+            return Err(self.poison(fmt!(
+                "read area of {} bytes is shorter than a GMC element header",
+                slice_1.len()
+            )));
+        };
+
+        if header.validate_framing().is_err() {
+            return Err(self.poison(fmt!(
+                "GMC element has bad MCTP framing, declared length {}",
+                header.length()
+            )));
+        }
+
+        let contents = self.payload_slices(slice_1, slice_2, header.payload_length())?;
+
+        Ok(GmcMessage { header, contents })
     }
 }

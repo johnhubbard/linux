@@ -70,6 +70,10 @@ impl MctpHeader {
     pub(crate) fn is_single_packet(self) -> bool {
         self.som().into_bool() && self.eom().into_bool()
     }
+
+    pub(crate) fn has_expected_version(self) -> bool {
+        u32::from(self.version()) == Self::VERSION
+    }
 }
 
 /// MCTP message type for PCI vendor-defined messages.
@@ -96,10 +100,14 @@ impl NvdmHeader {
             .with_nvdm_type(nvdm_type)
     }
 
-    /// Validates this header against the expected NVIDIA NVDM format and type.
-    pub(crate) fn validate(self, expected_type: NvdmType) -> bool {
+    pub(crate) fn has_nvidia_vendor(self) -> bool {
         u8::from(self.msg_type()) == MSG_TYPE_VENDOR_PCI
             && u16::from(self.vendor_id()) == Vendor::NVIDIA.as_raw()
+    }
+
+    /// Validates this header against the expected NVIDIA NVDM format and type.
+    pub(crate) fn validate(self, expected_type: NvdmType) -> bool {
+        self.has_nvidia_vendor()
             && matches!(self.nvdm_type(), Ok(nvdm_type) if nvdm_type == expected_type)
     }
 }

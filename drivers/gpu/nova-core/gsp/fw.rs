@@ -929,7 +929,6 @@ static_assert!(
         == core::mem::offset_of!(r000_00::GSP_MSG_QUEUE_ELEMENT, nvdmHeader)
 );
 
-#[expect(dead_code)]
 impl QueueElementHeader {
     /// Builds the header of an element whose message header and payload together take
     /// `message_len` bytes.
@@ -966,6 +965,31 @@ impl QueueElementHeader {
     fn element_count(&self) -> u32 {
         self.element_len
             .div_ceil(num::usize_into_u32::<GSP_PAGE_SIZE>())
+    }
+
+    /// Validates the transport headers, so that the lengths they declare can be trusted.
+    ///
+    /// `header_len` is the size of the headers the caller has decoded, which is the shortest
+    /// length a well-formed element can declare.
+    ///
+    /// # Errors
+    ///
+    /// - `EIO` if the magic, the MCTP version or the NVIDIA vendor id is wrong, or if the
+    ///   declared element length is below `header_len` or above the maximum element size.
+    fn validate(&self, header_len: usize) -> Result {
+        if self.magic != MCTP_MAGIC
+            || !self.mctp.has_expected_version()
+            || !self.nvdm.has_nvidia_vendor()
+        {
+            return Err(EIO);
+        }
+
+        let length = self.element_len();
+        if length < header_len || length > GSP_MSG_QUEUE_ELEMENT_SIZE_MAX {
+            return Err(EIO);
+        }
+
+        Ok(())
     }
 }
 
@@ -1058,9 +1082,19 @@ impl GspGmcMsgElement {
         })
     }
 
+    /// Returns the length of the payload that follows the GMC header.
+    pub(crate) fn payload_length(&self) -> usize {
+        self.transport.payload_len(size_of::<GmcApiHeader>())
+    }
+
     /// Returns the length of the whole element, headers included.
     pub(crate) fn length(&self) -> usize {
         self.transport.element_len()
+    }
+
+    /// Validates the transport headers. See [`QueueElementHeader::validate`].
+    pub(crate) fn validate_framing(&self) -> Result {
+        self.transport.validate(size_of::<Self>())
     }
 
     /// Returns the number of queue slots this element occupies.
