@@ -28,7 +28,13 @@ use crate::{
         FalconMem,
         FalconModSelAlgo, //
     },
-    firmware::gsp::GspFirmware,
+    firmware::{
+        gen_bootloader::{
+            BootloaderDmemDescV2,
+            GenericBootloader, //
+        },
+        gsp::GspFirmware,
+    },
     gsp::{
         cmdq::Cmdq,
         commands, //
@@ -155,6 +161,101 @@ impl super::Gsp {
         }
 
         Ok(())
+    }
+
+    /// Handle a `GSP_LOAD_EXEC_GENERIC_BOOTLOADER` event.
+    ///
+    /// The driver does not copy the image the GSP asks for. It writes the descriptor the event
+    /// carries to DMEM offset 0, places the generic bootloader in IMEM, points the requested FBIF
+    /// aperture at wherever the image lives, and runs the bootloader, which does the copy from
+    /// the descriptor and jumps to the image. The aperture is restored once the image halts, and
+    /// left pointing at the image otherwise.
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` if the payload is shorter than the parameter block, the descriptor is not the
+    ///   size this driver mirrors, or the event names a context DMA slot or an aperture that does
+    ///   not exist.
+    /// - `ETIMEDOUT` if the GSP does not suspend, or the image does not halt, in time.
+    #[expect(dead_code)]
+    #[expect(clippy::too_many_arguments)]
+    fn handle_load_exec_bootloader(
+        payload: &[u8],
+        bootloader: &GenericBootloader,
+        gsp_falcon: &Falcon<'_, Gsp>,
+        sec2_falcon: &Falcon<'_, Sec2>,
+        bar: Bar0<'_>,
+        dev: &device::Device,
+        bootloader_app_version: u32,
+        libos_dma_handle: u64,
+    ) -> Result {
+        let params = LoadExecGenericBootloaderParams::from_bytes_prefix(payload)
+            .ok_or(EINVAL)?
+            .0;
+
+        let desc_size =
+            u32::try_from(core::mem::size_of::<BootloaderDmemDescV2>()).map_err(|_| EOVERFLOW)?;
+        if params.dmem_desc_size != desc_size {
+            dev_err!(
+                dev,
+                "Load-exec descriptor is {} bytes, expected {}\n",
+                params.dmem_desc_size,
+                desc_size
+            );
+            return Err(EINVAL);
+        }
+
+        let ctx_dma = params.ctx_dma()?;
+        let fbif_target = params.fbif_target()?;
+        let transcfg = || {
+            regs::NV_PFALCON_FBIF_TRANSCFG::of::<Gsp>()
+                .try_at(usize::from(ctx_dma))
+                .ok_or(EINVAL)
+        };
+
+        gsp_falcon.wait_for_processor_suspend().inspect_err(|_| {
+            dev_err!(
+                dev,
+                "Timeout waiting for GSP suspend (mbox0={:#x})\n",
+                gsp_falcon.read_mailbox0()
+            );
+        })?;
+
+        gsp_falcon.reset()?;
+        gsp_falcon.dma_reset();
+
+        let saved_transcfg = bar.read(transcfg()?);
+        bar.update(transcfg()?, |v| {
+            v.with_target(fbif_target)
+                .with_mem_type(FalconFbifMemType::Physical)
+        });
+
+        gsp_falcon.pio_load(&bootloader.with_descriptor(&params.dmem_desc))?;
+
+        // Also clears the suspend bit that `wait_for_processor_suspend` polls, so the next
+        // load-and-execute event does not read this one's suspension.
+        gsp_falcon.write_mailboxes(Some(FLCN_ERR_BINARY_NOT_STARTED), None);
+
+        gsp_falcon.start()?;
+        gsp_falcon.wait_till_halted().inspect_err(|_| {
+            dev_err!(
+                dev,
+                "Timeout waiting for the loaded image to halt (mbox0={:#x})\n",
+                gsp_falcon.read_mailbox0()
+            );
+        })?;
+
+        // Only once the image has halted. A falcon that never halted may still be reading
+        // through this aperture.
+        bar.update(transcfg()?, |_| saved_transcfg);
+
+        Self::core_resume(
+            gsp_falcon,
+            sec2_falcon,
+            dev,
+            bootloader_app_version,
+            libos_dma_handle,
+        )
     }
 
     /// Handle a `GSP_LOAD_EXEC_HS_BINARY` event.
@@ -346,6 +447,64 @@ const FLCN_DMEM_VA_INVALID: u32 = 0xffff_ffff;
 /// Context DMA slot the HS binary is loaded through. Open RM hardcodes slot 0 for this event and
 /// points it at local framebuffer.
 const HS_BINARY_CTX_DMA: u8 = 0;
+
+/// Number of FBIF context DMA slots a falcon has.
+const NUM_CTX_DMA: usize = 8;
+
+/// Parameters for loading and executing the generic bootloader.
+///
+/// Sent by GSP-RM as the payload of `GSP_LOAD_EXEC_GENERIC_BOOTLOADER`. The descriptor carries
+/// the code and data addresses, while `addr_space` and `cpu_cache_attrib` say which FBIF aperture
+/// reaches them.
+#[repr(C)]
+struct LoadExecGenericBootloaderParams {
+    dmem_desc: BootloaderDmemDescV2,
+    dmem_desc_size: u32,
+    addr_space: u32,
+    cpu_cache_attrib: u32,
+    _reserved: [u32; 4],
+}
+
+impl LoadExecGenericBootloaderParams {
+    const ADDR_SYSMEM: u32 = 1;
+    const ADDR_FBMEM: u32 = 2;
+    const NV_MEMORY_CACHED: u32 = 0;
+    const NV_MEMORY_UNCACHED: u32 = 1;
+
+    /// Returns the context DMA slot the bootloader is to fetch the image through.
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` if the slot is outside the FBIF `TRANSCFG` array.
+    fn ctx_dma(&self) -> Result<u8> {
+        let ctx_dma = self.dmem_desc.ctx_dma;
+
+        u8::try_from(ctx_dma)
+            .ok()
+            .filter(|slot| usize::from(*slot) < NUM_CTX_DMA)
+            .ok_or(EINVAL)
+    }
+
+    /// Returns the FBIF aperture that reaches the image.
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` if the address space and cache attribute pair is not one this driver maps.
+    fn fbif_target(&self) -> Result<FalconFbifTarget> {
+        match (self.addr_space, self.cpu_cache_attrib) {
+            (Self::ADDR_FBMEM, _) => Ok(FalconFbifTarget::LocalFb),
+            (Self::ADDR_SYSMEM, Self::NV_MEMORY_CACHED) => Ok(FalconFbifTarget::CoherentSysmem),
+            (Self::ADDR_SYSMEM, Self::NV_MEMORY_UNCACHED) => {
+                Ok(FalconFbifTarget::NoncoherentSysmem)
+            }
+            _ => Err(EINVAL),
+        }
+    }
+}
+
+// SAFETY: The nested descriptor is `FromBytes`, and every other field is an integer type for
+// which all bit patterns are valid.
+unsafe impl FromBytes for LoadExecGenericBootloaderParams {}
 
 /// Parameters for loading and executing an HS (High-Security) binary.
 ///
