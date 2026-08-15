@@ -52,6 +52,7 @@ use crate::{
     driver::Bar0,
     gsp::{
         fw::{
+            GspGmcMsgElement,
             GspMsgElement,
             MsgFunction,
             MsgqRxHeader,
@@ -961,6 +962,64 @@ impl CmdqInner {
         }
 
         Ok(rpc_seq)
+    }
+
+    /// Sends a GMC API command to the GSP.
+    ///
+    /// `command_id` is the GMC command identifier (from `GMCAPI_COMMANDS`).
+    /// `payload` is the command-specific data following the [`super::fw::GmcApiHeader`].
+    /// `max_response_size` is the maximum expected response payload size.
+    ///
+    /// The command carries the next RPC sequence number, which the GSP echoes in its response.
+    /// The number is consumed whether or not the send succeeds.
+    ///
+    /// # Errors
+    ///
+    /// - `EMSGSIZE` if the command exceeds the maximum queue element size.
+    /// - `ETIMEDOUT` if space does not become available within the timeout.
+    /// - `EIO` if the command header is not properly aligned.
+    #[expect(dead_code)]
+    fn send_gmc(
+        &mut self,
+        bar: Bar0<'_>,
+        command_id: u32,
+        payload: &[u8],
+        max_response_size: u32,
+    ) -> Result {
+        let rpc_seq = self.rpc_seq;
+        self.rpc_seq = self.rpc_seq.wrapping_add(1);
+
+        let dst = self
+            .gsp_mem
+            .allocate_command::<GspGmcMsgElement>(payload.len(), Self::ALLOCATE_TIMEOUT)?;
+
+        let msg_element = GspGmcMsgElement::init(
+            command_id,
+            u64::from(rpc_seq),
+            payload.len(),
+            max_response_size,
+        );
+        // SAFETY: `dst.header` points to a valid, writable `GspGmcMsgElement` region.
+        unsafe {
+            msg_element.__init(core::ptr::from_mut(dst.header))?;
+        }
+
+        SBufferIter::new_writer([&mut dst.contents.0[..], &mut dst.contents.1[..]])
+            .write_all(payload)?;
+
+        dev_dbg!(
+            &self.dev,
+            "GSP GMC: send: seq# {}, command_id=0x{:x}, length=0x{:x}\n",
+            rpc_seq,
+            command_id,
+            dst.header.length(),
+        );
+
+        let elem_count = dst.header.element_count();
+        self.gsp_mem.advance_cpu_write_ptr(elem_count);
+        Cmdq::notify_gsp(bar);
+
+        Ok(())
     }
 
     /// Wait for a message to become available on the message queue.
