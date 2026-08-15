@@ -45,6 +45,9 @@ pub(crate) mod sec2;
 /// Alignment (in bytes) of falcon memory blocks.
 pub(crate) const MEM_BLOCK_ALIGNMENT: usize = 256;
 
+/// Number of FBIF context DMA slots a falcon has, matching the `NV_PFALCON_FBIF_TRANSCFG` array.
+pub(crate) const NUM_CTX_DMA_SLOTS: u8 = 8;
+
 bounded_enum! {
     /// Revision number of a falcon core, used in the [`crate::regs::NV_PFALCON_FALCON_HWCFG1`]
     /// register.
@@ -651,9 +654,8 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
         len: u32,
     ) -> Result {
         const DMA_LEN: u32 = num::usize_into_u32::<{ MEM_BLOCK_ALIGNMENT }>();
-        const NUM_CTXDMA_SLOTS: u8 = 8;
 
-        if ctx_dma >= NUM_CTXDMA_SLOTS {
+        if ctx_dma >= NUM_CTX_DMA_SLOTS {
             dev_err!(self.dev, "raw DMA: ctx_dma {} out of range\n", ctx_dma);
             return Err(EINVAL);
         }

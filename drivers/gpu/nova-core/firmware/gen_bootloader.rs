@@ -13,14 +13,23 @@ use kernel::{
         Alignable,
         Alignment, //
     },
+    transmute::{
+        AsBytes,
+        FromBytes, //
+    },
 };
 
 use crate::{
     falcon::{
         self,
+        gsp::Gsp,
         Falcon,
+        FalconBromParams,
         FalconEngine,
-        FalconPioImemLoadTarget, //
+        FalconFirmware,
+        FalconPioDmemLoadTarget,
+        FalconPioImemLoadTarget,
+        FalconPioLoadable, //
     },
     firmware::tlv::{
         request_tlv, //
@@ -29,6 +38,57 @@ use crate::{
     gpu::Chipset,
     num::FromSafeCast, //
 };
+
+/// Structure the generic bootloader reads from DMEM offset 0 to find the image it must load.
+///
+/// Mirrors Open RM's `RM_FLCN_BL_DMEM_DESC`. The driver fills one in when it loads a firmware
+/// through the bootloader, and GSP-RM sends one in a load-and-execute event.
+#[repr(C, packed)]
+#[derive(Debug, Clone)]
+pub(crate) struct BootloaderDmemDescV2 {
+    /// Reserved, should always be first element.
+    pub(crate) reserved: [u32; 4],
+    /// 16B signature for secure code, 0s if no secure code.
+    pub(crate) signature: [u32; 4],
+    /// DMA context used by the bootloader while loading code/data.
+    pub(crate) ctx_dma: u32,
+    /// 256B-aligned physical FB address where code is located.
+    pub(crate) code_dma_base: u64,
+    /// Offset from `code_dma_base` where the non-secure code is located.
+    ///
+    /// Also used as destination IMEM offset of non-secure code as the DMA firmware object is
+    /// expected to be a mirror image of its loaded state.
+    ///
+    /// Must be multiple of 256.
+    pub(crate) non_sec_code_off: u32,
+    /// Size of the non-secure code part.
+    pub(crate) non_sec_code_size: u32,
+    /// Offset from `code_dma_base` where the secure code is located (must be multiple of 256).
+    ///
+    /// Also used as destination IMEM offset of secure code as the DMA firmware object is expected
+    /// to be a mirror image of its loaded state.
+    ///
+    /// Must be multiple of 256.
+    pub(crate) sec_code_off: u32,
+    /// Size of the secure code part.
+    pub(crate) sec_code_size: u32,
+    /// Code entry point invoked by the bootloader after code is loaded.
+    pub(crate) code_entry_point: u32,
+    /// 256B-aligned physical FB address where data is located.
+    pub(crate) data_dma_base: u64,
+    /// Size of data block (should be multiple of 256B).
+    pub(crate) data_size: u32,
+    /// Number of arguments to be passed to the target firmware being loaded.
+    pub(crate) argc: u32,
+    /// Arguments to be passed to the target firmware being loaded.
+    pub(crate) argv: u32,
+}
+
+// SAFETY: This struct doesn't contain uninitialized bytes and doesn't have interior mutability.
+unsafe impl AsBytes for BootloaderDmemDescV2 {}
+
+// SAFETY: This struct only contains integer types for which all bit patterns are valid.
+unsafe impl FromBytes for BootloaderDmemDescV2 {}
 
 /// The generic falcon bootloader image, and where in IMEM it goes.
 pub(crate) struct GenericBootloader {
@@ -97,6 +157,59 @@ impl GenericBootloader {
             dst_start: self.imem_dst_start,
             secure: false,
             start_tag: self.start_tag,
+        }
+    }
+
+    /// Pairs this bootloader with the descriptor of the image it is to load, giving something
+    /// [`Falcon::pio_load`] accepts.
+    pub(crate) fn with_descriptor<'a>(
+        &'a self,
+        dmem_desc: &'a BootloaderDmemDescV2,
+    ) -> GenericBootloaderLoad<'a> {
+        GenericBootloaderLoad {
+            bootloader: self,
+            dmem_desc,
+        }
+    }
+}
+
+/// The generic bootloader together with the descriptor it reads from DMEM offset 0.
+pub(crate) struct GenericBootloaderLoad<'a> {
+    bootloader: &'a GenericBootloader,
+    dmem_desc: &'a BootloaderDmemDescV2,
+}
+
+impl FalconFirmware for GenericBootloaderLoad<'_> {
+    type Target = Gsp;
+
+    fn brom_params(&self) -> FalconBromParams {
+        // The bootloader is not signed. Every chipset that loads it this way uses a falcon HAL
+        // whose BROM programming is a no-op, so these values are never written to hardware.
+        FalconBromParams {
+            pkc_data_offset: 0,
+            engine_id_mask: 0,
+            ucode_id: 0,
+        }
+    }
+
+    fn boot_addr(&self) -> u32 {
+        self.bootloader.boot_addr()
+    }
+}
+
+impl FalconPioLoadable for GenericBootloaderLoad<'_> {
+    fn imem_sec_load_params(&self) -> Option<FalconPioImemLoadTarget<'_>> {
+        None
+    }
+
+    fn imem_ns_load_params(&self) -> Option<FalconPioImemLoadTarget<'_>> {
+        Some(self.bootloader.imem_load_params())
+    }
+
+    fn dmem_load_params(&self) -> FalconPioDmemLoadTarget<'_> {
+        FalconPioDmemLoadTarget {
+            data: self.dmem_desc.as_bytes(),
+            dst_start: 0,
         }
     }
 }
