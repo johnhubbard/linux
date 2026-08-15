@@ -967,7 +967,6 @@ static_assert!(
             + size_of::<r000_00::GSP_MSG_QUEUE_ELEMENT__bindgen_ty_1__bindgen_ty_2>()
 );
 
-#[expect(dead_code)]
 impl QueueElementHeader {
     /// Builds the queue element header of an element whose message header and payload together
     /// take `message_len` bytes.
@@ -991,7 +990,7 @@ impl QueueElementHeader {
     }
 
     /// Returns the length of the whole element, the queue element header included.
-    fn element_len(&self) -> usize {
+    pub(crate) fn element_len(&self) -> usize {
         num::u32_as_usize(self.element_len)
     }
 
@@ -1003,10 +1002,60 @@ impl QueueElementHeader {
     }
 
     /// Returns the number of queue slots that this element occupies.
-    fn element_count(&self) -> u32 {
+    pub(crate) fn element_count(&self) -> u32 {
         self.element_len
             .div_ceil(num::usize_into_u32::<GSP_PAGE_SIZE>())
     }
+
+    /// Validates the queue element header.
+    ///
+    /// Returns the first check that fails as a [`QueueElementHeaderError`].
+    pub(crate) fn validate(&self) -> Result<(), QueueElementHeaderError> {
+        if self.magic != MCTP_MAGIC {
+            return Err(QueueElementHeaderError::BadMagic);
+        }
+        // The MCTP start-of-message and end-of-message bits are not checked. Every element carries
+        // one whole message, because a large RPC is split into continuation records, not packets.
+        if !self.mctp.has_expected_version() {
+            return Err(QueueElementHeaderError::BadMctpVersion);
+        }
+        if !self.nvdm.has_nvidia_vendor() {
+            return Err(QueueElementHeaderError::BadNvdmVendor);
+        }
+
+        // Under confidential compute, GSP-RM pads the element out to whole queue slots, so the
+        // element may be longer than its queue element header and message together, but never
+        // shorter.
+        let length = self.element_len();
+        let min_length = size_of::<Self>().saturating_add(num::u32_as_usize(self.message_len));
+        if length < min_length || length > GSP_MSG_QUEUE_ELEMENT_SIZE_MAX {
+            return Err(QueueElementHeaderError::BadLength);
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn is_nvdm_type(&self, nvdm_type: NvdmType) -> bool {
+        self.nvdm.validate(nvdm_type)
+    }
+}
+
+/// The check of [`QueueElementHeader::validate`] that a queue element header fails.
+///
+/// The receive path logs the variant when it poisons the queue, so that the log names the check
+/// that failed.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum QueueElementHeaderError {
+    /// The first word is not `"MCTP"`.
+    BadMagic,
+    /// The MCTP header carries a version other than the one that this driver uses.
+    BadMctpVersion,
+    /// The NVDM header names a vendor other than NVIDIA, or a message type other than
+    /// vendor-defined.
+    BadNvdmVendor,
+    /// The element length is shorter than the queue element header and the message together, or
+    /// above the maximum element size.
+    BadLength,
 }
 
 // SAFETY: All fields are integer types or transparent wrappers over one, with no padding.
@@ -1113,6 +1162,12 @@ impl GspGmcMsgElement {
                 reserved: [0; 5],
             },
         })
+    }
+
+    /// Returns the length of the payload that follows the GMC API header, or `None` if the
+    /// message length in the queue element header is shorter than the GMC API header.
+    pub(crate) fn payload_length(&self) -> Option<usize> {
+        self.element_header.payload_len(size_of::<GmcApiHeader>())
     }
 
     /// Returns the length of the whole element, both headers included.
