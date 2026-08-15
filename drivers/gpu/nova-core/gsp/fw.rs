@@ -1016,6 +1016,12 @@ impl QueueElementHeader {
             .div_ceil(num::usize_into_u32::<GSP_PAGE_SIZE>())
     }
 
+    /// Returns `true` if the NVDM type is `nvdm_type`, which is what says which message header
+    /// follows this one.
+    fn is_nvdm_type(&self, nvdm_type: NvdmType) -> bool {
+        self.nvdm.validate(nvdm_type)
+    }
+
     /// Validates the framing before any length field in the element is trusted.
     ///
     /// `header_len` is the size of the decoded element type, and is the shortest length a
@@ -1064,6 +1070,10 @@ pub(crate) struct GmcApiHeader {
     reserved: [u32; 5],
 }
 
+/// Command identifier bits of [`GmcApiHeader::command`], matching Open RM's
+/// `GMCAPI_HEADER_COMMAND_ID_MASK`. The remaining byte carries flags.
+const GMCAPI_COMMAND_ID_MASK: u32 = 0x00ff_ffff;
+
 static_assert!(size_of::<GmcApiHeader>() == size_of::<r000_00::GMCAPI_HEADER>());
 static_assert!(
     core::mem::offset_of!(GmcApiHeader, command)
@@ -1085,6 +1095,13 @@ static_assert!(
     core::mem::offset_of!(GmcApiHeader, reserved)
         == core::mem::offset_of!(r000_00::GMCAPI_HEADER, reserved)
 );
+
+impl GmcApiHeader {
+    /// Returns the command identifier, without the flag byte.
+    pub(crate) fn command_id(&self) -> u32 {
+        self.command & GMCAPI_COMMAND_ID_MASK
+    }
+}
 
 // SAFETY: All fields are integer types with no uninitialized padding bytes.
 unsafe impl AsBytes for GmcApiHeader {}
@@ -1145,6 +1162,13 @@ impl GspGmcMsgElement {
     /// Validates the transport framing. See [`QueueElementHeader::validate`].
     pub(crate) fn validate_framing(&self) -> Result {
         self.transport.validate(size_of::<Self>())
+    }
+
+    /// Returns `true` if the NVDM type says a GMC header follows the transport header.
+    ///
+    /// When it returns `false`, `gmc` holds whatever header the other element kind puts there.
+    pub(crate) fn is_gmc_api(&self) -> bool {
+        self.transport.is_nvdm_type(NvdmType::GmcApi)
     }
 
     /// Returns the number of queue slots this element occupies.
