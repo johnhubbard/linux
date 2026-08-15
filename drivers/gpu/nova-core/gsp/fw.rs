@@ -1055,9 +1055,19 @@ impl GspGmcMsgElement {
         })
     }
 
+    /// Returns the length of the response payload (data after the [`GmcApiHeader`]).
+    pub(crate) fn payload_length(&self) -> usize {
+        num::u32_as_usize(self.nvdm_payload_size).saturating_sub(size_of::<GmcApiHeader>())
+    }
+
     /// Returns the total length of the message, transport and GMC headers included.
     pub(crate) fn length(&self) -> usize {
         num::u32_as_usize(self.mctp_payload_size)
+    }
+
+    /// Returns `true` if the MCTP magic field contains the expected value.
+    pub(crate) fn has_valid_magic(&self) -> bool {
+        self.mctp_magic == MCTP_MAGIC
     }
 
     /// Returns the number of elements (i.e. memory pages) used by this message.
