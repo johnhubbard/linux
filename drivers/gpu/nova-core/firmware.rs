@@ -26,6 +26,7 @@ pub(crate) mod bindata;
 pub(crate) mod booter;
 pub(crate) mod fsp;
 pub(crate) mod fwsec;
+pub(crate) mod gen_bootloader;
 pub(crate) mod gsp;
 pub(crate) mod radix3;
 pub(crate) mod riscv;
