@@ -515,7 +515,6 @@ struct GspMessage<'a> {
 /// A GMC message ready to be processed from the message queue.
 ///
 /// This is the type returned by [`CmdqInner::wait_for_gmc_msg`].
-#[expect(dead_code)]
 struct GmcMessage<'a> {
     // Reference to the headers of the message.
     header: &'a GspGmcMsgElement,
@@ -634,6 +633,21 @@ impl<'cmdq> Cmdq<'cmdq> {
         Error: From<M::InitError>,
     {
         self.inner.lock().send_command(command)
+    }
+
+    /// Receives one GMC event and passes its command id and payload slices to `handler`.
+    ///
+    /// This method may sleep while waiting. The queue mutex stays locked across the wait and the
+    /// `handler` call, so `handler` must not call back into this [`Cmdq`].
+    ///
+    /// See [`CmdqInner::receive_gmc_and_dispatch`] for the return value and the errors.
+    #[expect(dead_code)]
+    pub(crate) fn receive_gmc_and_dispatch<R>(
+        &self,
+        timeout: Delta,
+        handler: impl FnOnce(u32, &[u8], &[u8]) -> Option<R>,
+    ) -> Result<Option<R>> {
+        self.inner.lock().receive_gmc_and_dispatch(timeout, handler)
     }
 
     /// Waits for an unsolicited GSP event of type `M`. Events that arrive before it are logged and
@@ -1103,7 +1117,6 @@ impl CmdqInner<'_> {
     /// - `ETIMEDOUT` if no element arrives within `timeout`.
     /// - `EIO` if the queue is already poisoned, or if the framing is invalid, which poisons it
     ///   (see [`Self::poisoned`]).
-    #[expect(dead_code)]
     fn wait_for_gmc_msg(&self, timeout: Delta) -> Result<GmcMessage<'_>> {
         if self.poisoned.get() {
             return Err(EIO);
@@ -1134,5 +1147,58 @@ impl CmdqInner<'_> {
         let contents = self.payload_slices(slice_1, slice_2, header.payload_length())?;
 
         Ok(GmcMessage { header, contents })
+    }
+
+    /// Receives the next queue element. If it is a GMC element, passes its command id and the
+    /// payload slices after the GMC header to `handler`, which returns `None` for an element it
+    /// declines. The payload comes as two slices because the ring may wrap.
+    ///
+    /// Returns `Ok(None)` when nothing claimed the element, because it was not a GMC element or
+    /// the handler declined it. The read pointer advances past the element on every path.
+    ///
+    /// # Errors
+    ///
+    /// - `ETIMEDOUT` if no element arrives within `timeout`.
+    /// - `EIO` if the queue is poisoned or the element fails framing validation, as
+    ///   [`Self::wait_for_gmc_msg`] describes.
+    fn receive_gmc_and_dispatch<R>(
+        &mut self,
+        timeout: Delta,
+        handler: impl FnOnce(u32, &[u8], &[u8]) -> Option<R>,
+    ) -> Result<Option<R>> {
+        let message = self.wait_for_gmc_msg(timeout)?;
+        let header = message.header;
+        let element_count = header.element_count();
+
+        let result = if !header.is_gmc_api() {
+            dev_warn!(&self.dev, "GSP GMC: dropping non-GMC queue element\n");
+            None
+        } else if num::u32_as_usize(header.gmc.size) != header.payload_length() {
+            // GSP-RM writes both sizes from the same payload. If they differ, the driver cannot
+            // know which one is correct, so it drops the element.
+            dev_err!(
+                &self.dev,
+                "GSP GMC: payload is {} bytes, transport declares {}\n",
+                header.gmc.size,
+                header.payload_length(),
+            );
+            None
+        } else {
+            let command_id = header.gmc.command_id();
+
+            dev_dbg!(
+                &self.dev,
+                "GSP GMC: event: seq# {}, command_id=0x{:x}, length=0x{:x}\n",
+                header.gmc.sequence,
+                command_id,
+                header.length(),
+            );
+
+            handler(command_id, message.contents.0, message.contents.1)
+        };
+
+        self.gsp_mem.advance_cpu_read_ptr(element_count);
+
+        Ok(result)
     }
 }

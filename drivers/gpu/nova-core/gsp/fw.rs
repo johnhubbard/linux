@@ -967,6 +967,10 @@ impl QueueElementHeader {
             .div_ceil(num::usize_into_u32::<GSP_PAGE_SIZE>())
     }
 
+    fn is_nvdm_type(&self, nvdm_type: NvdmType) -> bool {
+        self.nvdm.validate(nvdm_type)
+    }
+
     /// Validates the transport headers, so that the lengths they declare can be trusted.
     ///
     /// `header_len` is the size of the headers the caller has decoded, which is the shortest
@@ -1014,6 +1018,9 @@ pub(crate) struct GmcApiHeader {
     reserved: [u32; 5],
 }
 
+/// Bits of [`GmcApiHeader::command`] that hold the command id. The high byte holds flags.
+const GMCAPI_COMMAND_ID_MASK: u32 = 0x00ff_ffff;
+
 static_assert!(size_of::<GmcApiHeader>() == size_of::<r000_00::GMCAPI_HEADER>());
 static_assert!(
     core::mem::offset_of!(GmcApiHeader, command)
@@ -1035,6 +1042,13 @@ static_assert!(
     core::mem::offset_of!(GmcApiHeader, reserved)
         == core::mem::offset_of!(r000_00::GMCAPI_HEADER, reserved)
 );
+
+impl GmcApiHeader {
+    /// Returns the command id, without the flag byte.
+    pub(crate) fn command_id(&self) -> u32 {
+        self.command & GMCAPI_COMMAND_ID_MASK
+    }
+}
 
 // SAFETY: All fields are integer types with no uninitialized padding bytes.
 unsafe impl AsBytes for GmcApiHeader {}
@@ -1095,6 +1109,12 @@ impl GspGmcMsgElement {
     /// Validates the transport headers. See [`QueueElementHeader::validate`].
     pub(crate) fn validate_framing(&self) -> Result {
         self.transport.validate(size_of::<Self>())
+    }
+
+    /// Returns whether a GMC header follows the transport headers. When this is `false`, `gmc`
+    /// holds whatever header the other kind of element puts there.
+    pub(crate) fn is_gmc_api(&self) -> bool {
+        self.transport.is_nvdm_type(NvdmType::GmcApi)
     }
 
     /// Returns the number of queue slots this element occupies.
