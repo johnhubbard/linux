@@ -140,7 +140,6 @@ pub(crate) enum FalconMem {
 }
 
 /// Where a raw falcon DMA transfer reads its image from, relative to the DMA base address.
-#[expect(dead_code)]
 #[derive(Copy, Clone)]
 pub(crate) enum FalconDmaSrcOffset {
     /// The image starts this many bytes past the DMA base address.
@@ -173,6 +172,17 @@ bounded_enum! {
         Virtual = 0,
         /// Physical memory addresses.
         Physical = 1,
+    }
+}
+
+bounded_enum! {
+    /// Engine ID that the falcon's framebuffer interface (FBIF) tags a DMA transfer with.
+    #[derive(Debug, Copy, Clone)]
+    pub(crate) enum FalconFbifEngineIdFlag with From<Bounded<u32, 1>> {
+        /// The BAR2 engine ID of PCI function 0.
+        Bar2Fn0 = 0,
+        /// The falcon's own engine ID.
+        Own = 1,
     }
 }
 
@@ -378,7 +388,7 @@ pub(crate) struct Falcon<'a, E: FalconEngine> {
     bar: Bar0<'a>,
     // TODO: make private
     pub(crate) pfalcon: Mmio<'a, PFalconRegisters>,
-    pfalcon2: Mmio<'a, PFalcon2Registers>,
+    pub(crate) pfalcon2: Mmio<'a, PFalcon2Registers>,
 }
 
 impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
@@ -623,7 +633,6 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
     ///   an IMEM target.
     /// - `ERANGE` if `src_addr` does not fit the `DMATRFBASE` register pair.
     /// - `EOVERFLOW` if a per-block source or destination offset exceeds `u32`.
-    #[expect(dead_code)]
     pub(crate) fn raw_dma_transfer(
         &self,
         ctx_dma: u8,
@@ -774,7 +783,6 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
     /// # Errors
     ///
     /// - `ETIMEDOUT` if the core has not suspended within two seconds.
-    #[expect(dead_code)]
     pub(crate) fn wait_for_processor_suspend(&self) -> Result {
         read_poll_timeout(
             || Ok(self.is_processor_suspended()),
