@@ -59,12 +59,14 @@ use crate::{
             MsgFunction,
             MsgqRxHeader,
             MsgqTxHeader,
+            QueueElementHeader,
             GSP_MSG_QUEUE_ELEMENT_SIZE_MAX, //
         },
         PteArray,
         GSP_PAGE_SHIFT,
         GSP_PAGE_SIZE, //
     },
+    mctp::NvdmType,
     num,
     sbuffer::SBufferIter, //
 };
@@ -475,6 +477,44 @@ struct GspMessage<'a> {
     contents: (&'a [u8], &'a [u8]),
 }
 
+/// A GMC (GPU Management Controller) API message ready to be processed from the message queue.
+///
+/// This is the message that [`QueueElement::Gmc`] carries.
+#[expect(dead_code)]
+struct GmcMessage<'a> {
+    // The queue element header and the GMC API header that open the element.
+    header: &'a GspGmcMsgElement,
+    // Slices to the payload that follows the GMC API header. The second slice is empty unless the
+    // payload wraps around the end of the message queue.
+    contents: (&'a [u8], &'a [u8]),
+}
+
+/// A queue element that has passed validation, decoded as an RPC message or as a GMC API message.
+///
+/// The queue element header holds an MCTP (Management Component Transport Protocol) header and an
+/// NVDM (NVIDIA vendor-defined message) header. The NVDM type selects between the two kinds of
+/// message.
+///
+/// This is the type returned by [`CmdqInner::wait_for_element`].
+enum QueueElement<'a> {
+    /// A GMC API message.
+    Gmc(GmcMessage<'a>),
+    /// An element whose NVDM type names another kind of message, such as an RM RPC. Only its
+    /// queue element header is decoded.
+    Other(&'a QueueElementHeader),
+}
+
+impl QueueElement<'_> {
+    /// Returns the number of queue slots that the element occupies.
+    #[expect(dead_code)]
+    fn element_count(&self) -> u32 {
+        match self {
+            Self::Gmc(message) => message.header.element_count(),
+            Self::Other(element_header) => element_header.element_count(),
+        }
+    }
+}
+
 /// GSP command queue.
 ///
 /// Provides the ability to send commands and receive messages from the GSP using a shared memory
@@ -838,29 +878,7 @@ impl CmdqInner<'_> {
             header.length(),
         );
 
-        let payload_length = header.payload_length();
-
-        // Check that the driver read area is large enough for the message.
-        if slice_1.len() + slice_2.len() < payload_length {
-            return Err(self.poison(fmt!(
-                "message advertises {} payload bytes but only {} are readable",
-                payload_length,
-                slice_1.len() + slice_2.len()
-            )));
-        }
-
-        // Cut the message slices down to the actual length of the message.
-        let (slice_1, slice_2) = if slice_1.len() > payload_length {
-            // PANIC: we checked above that `slice_1` is at least as long as `payload_length`.
-            (slice_1.split_at(payload_length).0, &slice_2[0..0])
-        } else {
-            (
-                slice_1,
-                // PANIC: we checked above that `slice_1.len() + slice_2.len()` is at least as
-                // large as `payload_length`.
-                slice_2.split_at(payload_length - slice_1.len()).0,
-            )
-        };
+        let (slice_1, slice_2) = self.payload_slices(slice_1, slice_2, header.payload_length())?;
 
         // Validate checksum.
         if Cmdq::calculate_checksum(SBufferIter::new_reader([
@@ -1028,5 +1046,108 @@ impl CmdqInner<'_> {
         }
 
         Ok(())
+    }
+
+    /// Truncates the read area that follows the queue element header and the message header to
+    /// the `payload_length` bytes of payload.
+    ///
+    /// # Errors
+    ///
+    /// - `EIO` if fewer bytes than that are readable, which poisons the queue.
+    fn payload_slices<'a>(
+        &self,
+        slice_1: &'a [u8],
+        slice_2: &'a [u8],
+        payload_length: usize,
+    ) -> Result<(&'a [u8], &'a [u8])> {
+        if slice_1.len() + slice_2.len() < payload_length {
+            return Err(self.poison(fmt!(
+                "message advertises {} payload bytes but only {} are readable",
+                payload_length,
+                slice_1.len() + slice_2.len()
+            )));
+        }
+
+        Ok(if slice_1.len() > payload_length {
+            // PANIC: we checked above that `slice_1` is at least as long as `payload_length`.
+            (slice_1.split_at(payload_length).0, &slice_2[0..0])
+        } else {
+            (
+                slice_1,
+                // PANIC: we checked above that `slice_1.len() + slice_2.len()` is at least as
+                // large as `payload_length`.
+                slice_2.split_at(payload_length - slice_1.len()).0,
+            )
+        })
+    }
+
+    /// Waits for the next queue element and decodes it as an RPC message or as a GMC API message.
+    ///
+    /// ```text
+    ///     +------------------------------------+
+    ///     | queue element header: magic, MCTP  |  validated
+    ///     |   header, NVDM header, lengths     |
+    ///     +------------------------------------+
+    ///     | message header                     |  decoded as a GMC API header when the NVDM type
+    ///     +------------------------------------+  is GmcApi, and left undecoded otherwise
+    ///     | payload                            |  truncated to the length that the queue
+    ///     +------------------------------------+  element header declares
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - `ETIMEDOUT` if no element arrives within `timeout`.
+    /// - `EIO` if the queue is already poisoned, or if the framing is invalid, which poisons it
+    ///   (see [`Self::poisoned`]).
+    #[expect(dead_code)]
+    fn wait_for_element(&self, timeout: Delta) -> Result<QueueElement<'_>> {
+        if self.poisoned.get() {
+            return Err(EIO);
+        }
+
+        let (slice_1, slice_2) = read_poll_timeout(
+            || Ok(self.gsp_mem.driver_read_area()),
+            |driver_area| !driver_area.0.is_empty(),
+            Delta::from_millis(1),
+            timeout,
+        )
+        .map(|(slice_1, slice_2)| (slice_1.as_flattened(), slice_2.as_flattened()))?;
+
+        let Some((element_header, _)) = QueueElementHeader::from_bytes_prefix(slice_1) else {
+            return Err(self.poison(fmt!(
+                "read area of {} bytes is shorter than a queue element header",
+                slice_1.len()
+            )));
+        };
+
+        if let Err(error) = element_header.validate() {
+            return Err(self.poison(fmt!(
+                "element has a bad queue element header ({:?}), declared length {}",
+                error,
+                element_header.element_len()
+            )));
+        }
+
+        if !element_header.is_nvdm_type(NvdmType::GmcApi) {
+            return Ok(QueueElement::Other(element_header));
+        }
+
+        let Some((header, slice_1)) = GspGmcMsgElement::from_bytes_prefix(slice_1) else {
+            return Err(self.poison(fmt!(
+                "read area of {} bytes is shorter than a GMC element header",
+                slice_1.len()
+            )));
+        };
+
+        let Some(payload_length) = header.payload_length() else {
+            return Err(self.poison(fmt!(
+                "GMC message seq# {} declares a message shorter than the GMC API header",
+                header.gmc.sequence
+            )));
+        };
+
+        let contents = self.payload_slices(slice_1, slice_2, payload_length)?;
+
+        Ok(QueueElement::Gmc(GmcMessage { header, contents }))
     }
 }
