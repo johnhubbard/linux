@@ -1048,12 +1048,16 @@ pub(crate) struct GmcApiHeader {
     /// Sequence number that GSP-RM copies from a request into its response.
     pub(crate) sequence: u64,
     /// In a request, the largest response that the sender accepts. In a response, the `NV_STATUS`.
-    pub(crate) max_resp_or_status: u32,
+    max_resp_or_status: u32,
     reserved: [u32; 5],
 }
 
 /// Bits of [`GmcApiHeader::command`] that hold the command id. The high byte holds flags.
 const GMCAPI_COMMAND_ID_MASK: u32 = 0x00ff_ffff;
+
+/// GMC request that carries the system information and registry keys to GSP-RM. GSP-RM answers
+/// it with the static GPU configuration once it has finished starting.
+pub(crate) const GMCAPI_CMD_GSP_INIT: u32 = r000_00::GMCAPI_COMMANDS_GMCAPI_CMD_GSP_INIT;
 
 /// GMC event that requests the driver to run the generic falcon bootloader on the descriptor that
 /// the event carries.
@@ -1097,7 +1101,6 @@ impl GmcApiHeader {
     ///
     /// The value is meaningful only on a response, which GSP-RM marks with a flag in the command
     /// word. In a request, the same word holds the largest response that the sender accepts.
-    #[expect(dead_code)]
     pub(crate) fn status(&self) -> u32 {
         self.max_resp_or_status
     }
