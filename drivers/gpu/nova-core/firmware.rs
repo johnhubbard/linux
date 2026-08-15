@@ -31,6 +31,39 @@ pub(crate) mod radix3;
 pub(crate) mod riscv;
 pub(crate) mod tlv;
 
+/// Maximum length of a build ID, matching Open RM's `BUILD_ID_MAX_LENGTH`.
+pub(crate) const BUILD_ID_MAX_LENGTH: usize = 32;
+
+/// A firmware build ID, which names the symbols a log buffer dump has to be decoded against.
+pub(crate) struct BuildId {
+    bytes: [u8; BUILD_ID_MAX_LENGTH],
+    len: u8,
+}
+
+impl BuildId {
+    /// Constructs a [`BuildId`] from raw descriptor bytes.
+    ///
+    /// Returns `None` if `data` is empty or exceeds [`BUILD_ID_MAX_LENGTH`].
+    pub(crate) fn from_raw(data: &[u8]) -> Option<Self> {
+        if data.is_empty() || data.len() > BUILD_ID_MAX_LENGTH {
+            return None;
+        }
+
+        let mut bytes = [0u8; BUILD_ID_MAX_LENGTH];
+        bytes[..data.len()].copy_from_slice(data);
+
+        Some(Self {
+            bytes,
+            len: data.len() as u8,
+        })
+    }
+
+    /// Returns the build ID bytes.
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+}
+
 /// Structure used to describe some firmwares, notably FWSEC-FRTS.
 #[repr(C)]
 #[derive(Debug, Clone, FromBytes)]

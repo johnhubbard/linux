@@ -140,6 +140,12 @@ impl Chipset {
         }
     }
 
+    /// Returns the implementation number that separates this chipset from the others of its
+    /// [`Architecture`], the low field of the chipset code `NV_PMC_BOOT_42` reports.
+    pub(crate) fn implementation(self) -> u32 {
+        (self as u32) & ((1 << regs::NV_PMC_BOOT_42::IMPLEMENTATION_RANGE.len()) - 1)
+    }
+
     /// Returns the address range of the PCI config mirror space.
     pub(crate) fn pci_config_mirror_range(self) -> Range<u32> {
         hal::gpu_hal(self).pci_config_mirror_range()
@@ -399,7 +405,7 @@ impl<'gpu> Gpu<'gpu> {
 
                 vgpu: VgpuManager::new(pdev, spec.chipset, fsp.as_mut()),
 
-                gsp <- Gsp::new(pdev),
+                gsp <- Gsp::new(pdev, spec.chipset),
 
                 // This member must be initialized last, so the `UnloadBundle` can never be dropped
                 // from outside of the constructed `GspResources`, ensuring that the unload sequence
