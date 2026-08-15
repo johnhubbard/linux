@@ -22,6 +22,7 @@ use crate::{
     num::IntoSafeCast, //
 };
 
+pub(crate) mod bindata;
 pub(crate) mod booter;
 pub(crate) mod fsp;
 pub(crate) mod fwsec;
@@ -348,7 +349,12 @@ impl<const N: usize> ModInfoBuilder<N> {
         let mut this = self
             .make_entry_file(name, "gsp_bootloader.tlv")
             .make_entry_file(name, "gsp.tlv")
-            .make_entry_file(name, "gsp.bin");
+            .make_entry_file(name, "gsp.bin")
+            .make_entry_file(name, "ucodes.tlv")
+            // `ucodes.tlv` may name another safe basename in its FILE tag, but module firmware
+            // metadata cannot describe a runtime-selected filename. Advertise the conventional
+            // filename used by the distributed metadata.
+            .make_entry_file(name, "ucodes.bin");
 
         // Add the firmware files specific to the GSP boot method of `chipset`.
         let boot_files = boot_firmware_files(chipset);

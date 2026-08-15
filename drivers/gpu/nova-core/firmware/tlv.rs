@@ -198,6 +198,62 @@ impl<'a> Tlv<'a> {
         self.iter().find(|b| b.tag == *tag).ok_or(EINVAL)
     }
 
+    fn contains(&self, tag: &[u8; 4]) -> bool {
+        self.iter().any(|b| b.tag == *tag)
+    }
+
+    /// Loads the payload described by this TLV into owned memory.
+    ///
+    /// The generic firmware TLV representation is either an inline `BLOB`, or a `FILE` basename
+    /// together with its `SIZE`. Mixing the representations or specifying only half of the file
+    /// representation is invalid. Referenced files are constrained to the metadata file's
+    /// directory.
+    pub(crate) fn load_blob_or_file(
+        &self,
+        dev: &device::Device,
+        chipset: gpu::Chipset,
+    ) -> Result<VVec<u8>> {
+        let has_blob = self.contains(b"BLOB");
+        let has_file = self.contains(b"FILE");
+        let has_size = self.contains(b"SIZE");
+
+        match (has_blob, has_file, has_size) {
+            (true, false, false) => {
+                let blob = self.get_bytes(b"BLOB")?;
+                let mut data = VVec::with_capacity(blob.len(), GFP_KERNEL).map_err(|_| ENOMEM)?;
+                data.extend_from_slice(blob, GFP_KERNEL)?;
+                Ok(data)
+            }
+            (false, true, true) => {
+                let file = self.get_string(b"FILE")?;
+
+                // FILE is a basename relative to the TLV's directory, not an arbitrary firmware
+                // path. Reject path separators, special directory names, NULs and control bytes.
+                if file.is_empty()
+                    || matches!(file, "." | "..")
+                    || file
+                        .bytes()
+                        .any(|b| b == b'/' || b == b'\\' || b.is_ascii_control())
+                {
+                    return Err(EINVAL);
+                }
+
+                let size = usize::from_safe_cast(self.get_u32(b"SIZE")?);
+                if size == 0 {
+                    return Err(EINVAL); // TODO: Use ENODATA once available.
+                }
+
+                let mut data = VVec::zeroed(size, GFP_KERNEL).map_err(|_| ENOMEM)?;
+                let chip_name = chipset.name();
+                let path = CString::try_from_fmt(fmt!("nvidia/{chip_name}/gsp/{file}"))?;
+                firmware::request_into_buf(&path, dev, data.as_mut_slice())?;
+
+                Ok(data)
+            }
+            _ => Err(EINVAL),
+        }
+    }
+
     /// Return a slice of bytes.
     ///
     /// Returns `EINVAL` if the value is empty.
