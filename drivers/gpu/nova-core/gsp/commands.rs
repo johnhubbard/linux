@@ -30,7 +30,15 @@ use crate::{
         },
         fw::{
             self,
+            commands::{
+                GspInitRequest,
+                RegKey, //
+            },
             MsgFunction, //
+        },
+        nvkv::{
+            Encodeable,
+            Encoder, //
         },
     },
     sbuffer::SBufferIter,
@@ -257,6 +265,46 @@ impl GetGspStaticInfoReply {
             .to_str()
             .map_err(GpuNameError::InvalidUtf8)
     }
+}
+
+/// Registry entries the driver sends to GSP-RM on every boot.
+///
+/// `RMSecBusResetEnable` enables PCI secondary bus reset. `RMForcePcieConfigSave` makes GSP-RM
+/// preserve PCI configuration registers across any PCI reset. `RMDevidCheckIgnore` lets GSP-RM
+/// boot when the PCI device id is absent from its product name database.
+const REGISTRY_ENTRIES: &[(&[u8], u32)] = &[
+    (b"RMSecBusResetEnable\0", 1),
+    (b"RMForcePcieConfigSave\0", 1),
+    (b"RMDevidCheckIgnore\0", 1),
+];
+
+/// Builds the NVKV-encoded payload of a `GSP_INIT` request.
+///
+/// The payload carries the system information GSP-RM reads before it starts, and
+/// [`REGISTRY_ENTRIES`] as `REGKEY_NAME` and `REGKEY_VALUE_U32` pairs. GSP-RM requires each name
+/// to be followed by its value, which is the order [`RegKey`] declares them in.
+///
+/// # Errors
+///
+/// - `ENOMEM` if the registry list or the encoder buffer cannot be allocated.
+#[expect(dead_code)]
+pub(crate) fn build_gsp_init_payload(
+    pdev: &pci::Device<device::Bound>,
+    chipset: Chipset,
+    vgpu_state: VgpuState,
+) -> Result<KVVec<u64>> {
+    let mut regkeys = KVVec::new();
+    for &(name, value) in REGISTRY_ENTRIES {
+        regkeys.push(RegKey::new(name, value), GFP_KERNEL)?;
+    }
+    if matches!(vgpu_state, VgpuState::Enabled { .. }) {
+        regkeys.push(RegKey::new(b"RMSetSriovMode\0", 1), GFP_KERNEL)?;
+    }
+
+    let mut encoder = Encoder::new();
+    GspInitRequest::new(pdev, chipset, regkeys).encode(&mut encoder)?;
+
+    Ok(encoder.finish())
 }
 
 pub(crate) use fw::commands::PowerStateLevel;
