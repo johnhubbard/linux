@@ -28,6 +28,10 @@ bounded_enum! {
         Cot = 0x14,
         /// FSP command response.
         FspResponse = 0x15,
+        /// RPC message to or from GSP-RM.
+        RmRpc = 0x25,
+        /// GMC (GPU Management Controller) API message to or from GSP-RM.
+        GmcApi = 0x26,
     }
 }
 
