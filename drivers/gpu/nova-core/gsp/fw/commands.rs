@@ -18,7 +18,8 @@ use kernel::{
 use crate::{
     gpu::Chipset,
     gsp::GSP_PAGE_SIZE,
-    num::IntoSafeCast, //
+    num::IntoSafeCast,
+    vgpu::VgpuState, //
 };
 
 use crate::gsp::nvkv::{
@@ -258,6 +259,25 @@ pub(crate) enum HostArch {
     Riscv64 = 5,
 }
 
+impl HostArch {
+    /// Returns the variant that names the architecture for which this kernel is built.
+    fn host() -> Self {
+        if cfg!(target_arch = "x86_64") {
+            Self::X86_64
+        } else if cfg!(target_arch = "aarch64") {
+            Self::Aarch64
+        } else if cfg!(target_arch = "powerpc64") {
+            Self::Ppc64le
+        } else if cfg!(target_arch = "arm") {
+            Self::Arm
+        } else if cfg!(target_arch = "riscv64") {
+            Self::Riscv64
+        } else {
+            Self::None
+        }
+    }
+}
+
 // TODO[FPRI]: This is a temporary solution to be replaced with the corresponding derive macros once
 // they land.
 impl TryFrom<u32> for HostArch {
@@ -284,7 +304,7 @@ impl From<HostArch> for u32 {
 
 nvkv_encode! {
     /// A GSP registry entry.
-    struct RegKey {
+    pub(crate) struct RegKey {
         key_name: Key<&'static [u8], { Self::REGKEY_NAME_KEY }>,
         key_value: Key<u32, { Self::REGKEY_VALUE_U32_KEY }>,
     }
@@ -294,6 +314,17 @@ impl RegKey {
     // Define the Key IDs read/written by GSP.
     const REGKEY_NAME_KEY: KeyId = 0x3070;
     const REGKEY_VALUE_U32_KEY: KeyId = 0x3071;
+
+    /// Creates a registry entry.
+    ///
+    /// `key_name` must include its NUL terminator, which GSP-RM counts in the encoded name
+    /// length.
+    pub(crate) fn new(key_name: &'static [u8], key_value: u32) -> Self {
+        Self {
+            key_name: key_name.into(),
+            key_value: key_value.into(),
+        }
+    }
 }
 
 impl Encodable for KVVec<RegKey> {
@@ -329,21 +360,39 @@ impl VfInfo {
 
 nvkv_encode! {
     /// Payload of the `GSP_INIT` command.
-    // TODO: expect() doesn't work here due to Self:: reference, fixed in 1.97.0
-    // https://github.com/rust-lang/rust/pull/154377
-    #[cfg_attr(not(CONFIG_KUNIT), allow(dead_code))]
-    struct GspInitRequest {
+    pub(crate) struct GspInitRequest {
         pci_device_id: Key<u32, { Self::PCI_DEVICE_ID_KEY }>,
         pci_sub_device_id: Key<u32, { Self::PCI_SUBDEVICE_ID_KEY }>,
         pci_revision_id: Key<u32, { Self::PCI_REVISION_ID_KEY }>,
         pci_config_mirror_base: Key<u32, { Self::PCI_CONFIG_MIRROR_BASE_KEY }>,
         pci_config_mirror_size: Key<u32, { Self::PCI_CONFIG_MIRROR_SIZE_KEY }>,
         host_arch: Key<HostArch, { Self::HOST_ARCH_KEY }, u32>,
-        bus_device_func: Key<u64, { Self::NV_DOMAIN_BUS_DEVICE_FUNC_KEY }>,
+        domain_bus_device: Key<u64, { Self::NV_DOMAIN_BUS_DEVICE_FUNC_KEY }>,
         regkeys: KVVec<RegKey>,
         vf_info: Option<VfInfo>,
     }
 }
+
+bitfield! {
+    /// A GPU's PCI location, encoded as GSP-RM decodes it. Despite the name that GSP-RM gives
+    /// the key, the function number is not part of the value.
+    struct DomainBusDevice(u64) {
+        63:32 domain;
+        15:8 bus;
+        7:0 device;
+    }
+}
+
+/// Registry entries that the driver sends to GSP-RM on every boot.
+///
+/// `RMSecBusResetEnable` enables PCI secondary bus reset. `RMForcePcieConfigSave` makes GSP-RM
+/// preserve PCI configuration registers across any PCI reset. `RMDevidCheckIgnore` lets GSP-RM
+/// boot when the PCI device id is absent from its product name database.
+const REGISTRY_ENTRIES: &[(&[u8], u32)] = &[
+    (b"RMSecBusResetEnable\0", 1),
+    (b"RMForcePcieConfigSave\0", 1),
+    (b"RMDevidCheckIgnore\0", 1),
+];
 
 impl GspInitRequest {
     // Define the Key IDs read/written by GSP.
@@ -354,6 +403,51 @@ impl GspInitRequest {
     const PCI_CONFIG_MIRROR_SIZE_KEY: KeyId = 0x0011;
     const HOST_ARCH_KEY: KeyId = 0x0070;
     const NV_DOMAIN_BUS_DEVICE_FUNC_KEY: KeyId = 0x1020;
+
+    /// Creates the request for `dev`.
+    ///
+    /// The registry keys are [`REGISTRY_ENTRIES`], plus `RMSetSriovMode` when `vgpu_state` reports
+    /// that vGPU is enabled.
+    ///
+    /// # Errors
+    ///
+    /// - `ENOMEM` if the registry list cannot be allocated.
+    pub(crate) fn new(
+        dev: &pci::Device<device::Bound>,
+        chipset: Chipset,
+        vgpu_state: VgpuState,
+    ) -> Result<Self> {
+        let mut regkeys = KVVec::new();
+        for &(name, value) in REGISTRY_ENTRIES {
+            regkeys.push(RegKey::new(name, value), GFP_KERNEL)?;
+        }
+        if matches!(vgpu_state, VgpuState::Enabled { .. }) {
+            regkeys.push(RegKey::new(b"RMSetSriovMode\0", 1), GFP_KERNEL)?;
+        }
+
+        let mirror = chipset.pci_config_mirror_range();
+        // `PCI_DEVID` packs the bus, device and function as the low half of a `Dbdf` does.
+        let dev_id = Dbdf::from(u32::from(dev.dev_id()));
+        let domain_bus_device = DomainBusDevice::zeroed()
+            .with_domain(dev.domain_nr())
+            .with_bus(u8::from(dev_id.bus()))
+            .with_device(u8::from(dev_id.device()));
+        let device_id = (u32::from(dev.device_id()) << 16) | u32::from(dev.vendor_id().as_raw());
+        let sub_device_id =
+            (u32::from(dev.subsystem_device_id()) << 16) | u32::from(dev.subsystem_vendor_id());
+
+        Ok(Self {
+            pci_device_id: device_id.into(),
+            pci_sub_device_id: sub_device_id.into(),
+            pci_revision_id: u32::from(dev.revision_id()).into(),
+            pci_config_mirror_base: mirror.start.into(),
+            pci_config_mirror_size: (mirror.end - mirror.start).into(),
+            host_arch: HostArch::host().into(),
+            domain_bus_device: u64::from(domain_bus_device).into(),
+            regkeys,
+            vf_info: None,
+        })
+    }
 }
 
 // Decode:
@@ -753,7 +847,7 @@ mod tests {
             pci_config_mirror_base: 0x1234_5678.into(),
             pci_config_mirror_size: 0x1000.into(),
             host_arch: HostArch::Aarch64.into(),
-            bus_device_func: 0x0001_0203_0405_0607.into(),
+            domain_bus_device: 0x0001_0203_0405_0607.into(),
             regkeys,
             vf_info: Some(VfInfo {
                 total_vfs: 8.into(),
