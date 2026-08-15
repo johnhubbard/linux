@@ -16,6 +16,7 @@ use kernel::{
 
 use crate::{
     falcon::{
+        self,
         gsp::Gsp,
         sec2::Sec2,
         Falcon,
@@ -26,7 +27,13 @@ use crate::{
         FalconMem,
         FalconModSelAlgo, //
     },
-    firmware::gsp::GspFirmware,
+    firmware::{
+        gen_bootloader::{
+            BootloaderDmemDescV2,
+            GenericBootloader, //
+        },
+        gsp::GspFirmware,
+    },
     gsp::{
         cmdq::Cmdq,
         commands, //
@@ -36,6 +43,8 @@ use crate::{
 
 /// The falcons, device and boot parameters that the load-and-execute event handlers share.
 struct LoadExecContext<'a, 'gpu> {
+    /// The generic falcon bootloader, on chipsets that boot through it.
+    bootloader: Option<&'a GenericBootloader>,
     gsp_falcon: &'a Falcon<'gpu, Gsp>,
     sec2_falcon: &'a Falcon<'gpu, Sec2>,
     dev: &'a device::Device,
@@ -160,6 +169,85 @@ impl<'gsp> super::Gsp<'gsp> {
         }
 
         Ok(())
+    }
+
+    /// Handles a `GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER` event: runs the generic bootloader on the
+    /// GSP falcon against the descriptor the event carries, then restarts GSP-RM.
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` if this chipset boots without the generic bootloader, if the payload is shorter
+    ///   than the parameter block, if the descriptor is not the size this driver mirrors, or if
+    ///   the event names a context DMA slot or an aperture that does not exist.
+    /// - `ETIMEDOUT` if the GSP does not suspend, or the image does not halt, in time.
+    #[expect(dead_code)]
+    fn handle_load_exec_bootloader(ctx: &LoadExecContext<'_, '_>, payload: &[u8]) -> Result {
+        let LoadExecContext {
+            gsp_falcon, dev, ..
+        } = *ctx;
+        let Some(bootloader) = ctx.bootloader else {
+            dev_err!(
+                dev,
+                "GSP asked for the generic bootloader, which this chipset does not use\n"
+            );
+            return Err(EINVAL);
+        };
+        let params = LoadExecGenericBootloaderParams::from_bytes_prefix(payload)
+            .ok_or(EINVAL)?
+            .0;
+
+        let desc_size =
+            u32::try_from(core::mem::size_of::<BootloaderDmemDescV2>()).map_err(|_| EOVERFLOW)?;
+        if params.dmem_desc_size != desc_size {
+            dev_err!(
+                dev,
+                "Load-exec descriptor is {} bytes, expected {}\n",
+                params.dmem_desc_size,
+                desc_size
+            );
+            return Err(EINVAL);
+        }
+
+        let ctx_dma = params.ctx_dma()?;
+        let fbif_target = params.fbif_target()?;
+        let transcfg =
+            || regs::NV_PFALCON_FBIF_TRANSCFG::try_at(usize::from(ctx_dma)).ok_or(EINVAL);
+
+        gsp_falcon.wait_for_processor_suspend().inspect_err(|_| {
+            dev_err!(
+                dev,
+                "Timeout waiting for GSP suspend (mbox0={:#x})\n",
+                gsp_falcon.read_mailbox0()
+            );
+        })?;
+
+        gsp_falcon.reset()?;
+        gsp_falcon.dma_reset();
+
+        let saved_transcfg = gsp_falcon.pfalcon.read(transcfg()?);
+        gsp_falcon.pfalcon.update(transcfg()?, |v| {
+            v.with_target(fbif_target)
+                .with_mem_type(FalconFbifMemType::Physical)
+        });
+
+        gsp_falcon.pio_load(&bootloader.with_descriptor(&params.dmem_desc))?;
+
+        gsp_falcon.write_mailboxes(Some(FLCN_ERR_BINARY_NOT_STARTED), None);
+
+        gsp_falcon.start()?;
+        gsp_falcon.wait_till_halted().inspect_err(|_| {
+            dev_err!(
+                dev,
+                "Timeout waiting for the loaded image to halt (mbox0={:#x})\n",
+                gsp_falcon.read_mailbox0()
+            );
+        })?;
+
+        // A falcon that never halted may still be reading through this aperture, so it is
+        // restored only once the image has halted.
+        gsp_falcon.pfalcon.update(transcfg()?, |_| saved_transcfg);
+
+        Self::core_resume(ctx)
     }
 
     /// Handles a `GMCAPI_CMD_EXEC_HS_BINARY` event: runs the high-security binary that GSP-RM
@@ -326,6 +414,60 @@ const FLCN_DMEM_VA_INVALID: u32 = 0xffff_ffff;
 
 /// Context DMA slot the HS binary is loaded through.
 const HS_BINARY_CTX_DMA: u8 = 0;
+
+/// Payload of a `GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER` event.
+///
+/// The descriptor carries the code and data addresses, and `addr_space` and `cpu_cache_attrib`
+/// say which FBIF aperture reaches them.
+#[repr(C)]
+struct LoadExecGenericBootloaderParams {
+    dmem_desc: BootloaderDmemDescV2,
+    dmem_desc_size: u32,
+    addr_space: u32,
+    cpu_cache_attrib: u32,
+    _reserved: [u32; 4],
+}
+
+impl LoadExecGenericBootloaderParams {
+    const ADDR_SYSMEM: u32 = 1;
+    const ADDR_FBMEM: u32 = 2;
+    const NV_MEMORY_CACHED: u32 = 0;
+    const NV_MEMORY_UNCACHED: u32 = 1;
+
+    /// Returns the context DMA slot for fetching the image.
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` if the slot is outside the FBIF `TRANSCFG` array.
+    fn ctx_dma(&self) -> Result<u8> {
+        let ctx_dma = self.dmem_desc.ctx_dma;
+
+        u8::try_from(ctx_dma)
+            .ok()
+            .filter(|slot| *slot < falcon::NUM_CTX_DMA_SLOTS)
+            .ok_or(EINVAL)
+    }
+
+    /// Returns the FBIF aperture that reaches the image.
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` if the address space and cache attribute pair is not one this driver maps.
+    fn fbif_target(&self) -> Result<FalconFbifTarget> {
+        match (self.addr_space, self.cpu_cache_attrib) {
+            (Self::ADDR_FBMEM, _) => Ok(FalconFbifTarget::LocalFb),
+            (Self::ADDR_SYSMEM, Self::NV_MEMORY_CACHED) => Ok(FalconFbifTarget::CoherentSysmem),
+            (Self::ADDR_SYSMEM, Self::NV_MEMORY_UNCACHED) => {
+                Ok(FalconFbifTarget::NoncoherentSysmem)
+            }
+            _ => Err(EINVAL),
+        }
+    }
+}
+
+// SAFETY: The nested descriptor is `FromBytes`, and every other field is an integer type for
+// which all bit patterns are valid.
+unsafe impl FromBytes for LoadExecGenericBootloaderParams {}
 
 /// Payload of a `GMCAPI_CMD_EXEC_HS_BINARY` event.
 ///
