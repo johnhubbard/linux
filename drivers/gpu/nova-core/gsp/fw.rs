@@ -1008,6 +1008,10 @@ pub(crate) struct GmcApiHeader {
     reserved: [u32; 5],
 }
 
+/// Command identifier bits of [`GmcApiHeader::command`], matching Open RM's
+/// `GMCAPI_HEADER_COMMAND_ID_MASK`. The remaining byte carries flags.
+const GMCAPI_COMMAND_ID_MASK: u32 = 0x00ff_ffff;
+
 static_assert!(size_of::<GmcApiHeader>() == size_of::<r000_00::GMCAPI_HEADER>());
 static_assert!(
     core::mem::offset_of!(GmcApiHeader, command)
@@ -1029,6 +1033,13 @@ static_assert!(
     core::mem::offset_of!(GmcApiHeader, reserved)
         == core::mem::offset_of!(r000_00::GMCAPI_HEADER, reserved)
 );
+
+impl GmcApiHeader {
+    /// Returns the command identifier, without the flag byte.
+    pub(crate) fn command_id(&self) -> u32 {
+        self.command & GMCAPI_COMMAND_ID_MASK
+    }
+}
 
 // SAFETY: All fields are integer types with no uninitialized padding bytes.
 unsafe impl AsBytes for GmcApiHeader {}
@@ -1132,6 +1143,15 @@ impl GspGmcMsgElement {
             self.nvdm_header,
             size_of::<Self>(),
         )
+    }
+
+    /// Returns `true` if the NVDM header routes this element to the GSP's GMC dispatch.
+    ///
+    /// A [`GspMsgElement`] and a [`GspGmcMsgElement`] share every field through `nvdm_header`,
+    /// so the NVDM type is what distinguishes the two on the queue, and `gmc` holds an RPC
+    /// header rather than a GMC one when this returns `false`.
+    pub(crate) fn is_gmc_api(&self) -> bool {
+        self.nvdm_header.validate(NvdmType::GmcApi)
     }
 
     /// Returns the number of elements (i.e. memory pages) used by this message.

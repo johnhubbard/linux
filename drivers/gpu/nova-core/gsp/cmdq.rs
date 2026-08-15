@@ -641,7 +641,6 @@ struct GspMessage<'a> {
 /// A GMC message ready to be processed from the message queue.
 ///
 /// This is the type returned by [`CmdqInner::wait_for_gmc_msg`].
-#[expect(dead_code)]
 struct GmcMessage<'a> {
     // Reference to the header of the message.
     header: &'a GspGmcMsgElement,
@@ -789,6 +788,22 @@ impl Cmdq {
         Error: From<M::InitError>,
     {
         self.inner.lock().receive_msg(timeout, None)
+    }
+
+    /// Receives one GMC event from the GSP and passes its command id and raw payload slices to
+    /// `handler`.
+    ///
+    /// This method may sleep while waiting. The [`CmdqInner`] mutex stays locked across the wait
+    /// and across the `handler` call, so `handler` must not call back into this [`Cmdq`].
+    ///
+    /// See [`CmdqInner::receive_gmc_and_dispatch`] for return values, queue state, and errors.
+    #[expect(dead_code)]
+    pub(crate) fn receive_gmc_and_dispatch<R>(
+        &self,
+        timeout: Delta,
+        handler: impl FnOnce(u32, &[u8], &[u8]) -> Option<R>,
+    ) -> Result<Option<R>> {
+        self.inner.lock().receive_gmc_and_dispatch(timeout, handler)
     }
 
     /// Waits for an unsolicited GSP event of type `M`, dispatching any other event that arrives
@@ -1314,7 +1329,6 @@ impl CmdqInner {
     /// - `ETIMEDOUT` if `timeout` has elapsed before any message becomes available.
     /// - `EIO` if the framing is invalid, or the queue was already poisoned by an earlier such
     ///   failure. Either failure poisons the queue, so recovery requires a reset.
-    #[expect(dead_code)]
     fn wait_for_gmc_msg(&self, timeout: Delta) -> Result<GmcMessage<'_>> {
         if self.poisoned.get() {
             return Err(EIO);
@@ -1369,5 +1383,66 @@ impl CmdqInner {
             header,
             contents: (slice_1, slice_2),
         })
+    }
+
+    /// Receive the next GMC event from the GSP and dispatch it through a handler.
+    ///
+    /// The handler receives the GMC command id and the raw payload slices that follow the
+    /// [`super::fw::GmcApiHeader`] (two slices because the circular buffer may wrap). It returns
+    /// `None` for an event it does not handle.
+    ///
+    /// Where [`Self::receive_msg`] keys on [`MsgFunction`], this keys on the GMC command id,
+    /// which is the form the r000 firmware uses for boot events.
+    ///
+    /// Returns `Ok(None)` when nothing claimed the element, either because it is not a GMC
+    /// element or because the handler declined it. The read pointer is advanced on every path.
+    ///
+    /// # Errors
+    ///
+    /// - `ETIMEDOUT` if `timeout` has elapsed before any message becomes available.
+    /// - `EIO` if the queue is poisoned or the element fails framing validation (see
+    ///   [`Self::wait_for_gmc_msg`]).
+    fn receive_gmc_and_dispatch<R>(
+        &mut self,
+        timeout: Delta,
+        handler: impl FnOnce(u32, &[u8], &[u8]) -> Option<R>,
+    ) -> Result<Option<R>> {
+        let message = self.wait_for_gmc_msg(timeout)?;
+        let header = message.header;
+        let length = header.length();
+
+        // The RPC and GMC elements share every field through `nvdm_header`, so `gmc` holds an
+        // RPC header rather than a GMC one unless the NVDM type says otherwise.
+        let result = if !header.is_gmc_api() {
+            dev_warn!(&self.dev, "GSP GMC: dropping non-GMC queue element\n");
+            None
+        } else if num::u32_as_usize(header.gmc.size) != header.payload_length() {
+            // GSP-RM sends the element as the GMC header plus `size` bytes, so the two lengths
+            // describe the same payload and a handler cannot tell which one to believe.
+            dev_err!(
+                &self.dev,
+                "GSP GMC: payload is {} bytes, transport declares {}\n",
+                header.gmc.size,
+                header.payload_length(),
+            );
+            None
+        } else {
+            let command_id = header.gmc.command_id();
+
+            dev_dbg!(
+                &self.dev,
+                "GSP GMC: event: seq# {}, command_id=0x{:x}, length=0x{:x}\n",
+                header.gmc.sequence,
+                command_id,
+                length,
+            );
+
+            handler(command_id, message.contents.0, message.contents.1)
+        };
+
+        self.gsp_mem
+            .advance_cpu_read_ptr(u32::try_from(length.div_ceil(GSP_PAGE_SIZE))?);
+
+        Ok(result)
     }
 }
