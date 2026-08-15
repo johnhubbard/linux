@@ -198,6 +198,40 @@ impl<'a> Tlv<'a> {
         self.iter().find(|b| b.tag == *tag).ok_or(EINVAL)
     }
 
+    /// Loads the file this metadata names, from `chipset`'s firmware directory.
+    ///
+    /// A TLV that names its payload instead of carrying it inline holds the basename in `FILE`
+    /// and the payload length in `SIZE`. On success the returned buffer is exactly `SIZE` bytes,
+    /// alongside the path that was requested.
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` if `FILE` or `SIZE` is absent, or `FILE` does not hold a valid string.
+    /// - `ENODATA` if `SIZE` is zero.
+    /// - `ENOMEM` if the buffer cannot be allocated.
+    ///
+    /// Errors from the firmware request, `ENOENT` in particular, are propagated as-is.
+    pub(crate) fn load_file(
+        &self,
+        dev: &device::Device,
+        chipset: gpu::Chipset,
+    ) -> Result<(CString, VVec<u8>)> {
+        let file = self.get_string(b"FILE")?;
+
+        let chip_name = chipset.name();
+        let path = CString::try_from_fmt(fmt!("nvidia/{chip_name}/gsp/{file}"))?;
+
+        let size = usize::from_safe_cast(self.get_u32(b"SIZE")?);
+        if size == 0 {
+            return Err(ENODATA);
+        }
+
+        let mut data = VVec::zeroed(size, GFP_KERNEL).map_err(|_| ENOMEM)?;
+        firmware::request_into_buf(&path, dev, data.as_mut_slice())?;
+
+        Ok((path, data))
+    }
+
     /// Return a slice of bytes.
     ///
     /// Returns `EINVAL` if the value is empty.
