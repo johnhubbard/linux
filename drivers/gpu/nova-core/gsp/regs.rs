@@ -8,11 +8,30 @@ use crate::{
 };
 
 // PGSP
+// The GSP has eight numbered queues, each with its own four msgq pointer registers. nova-core
+// uses queue 0 only, so each register is declared as a scalar at its queue 0 offset.
 
 register! {
     base: NovaRegisters;
 
+    /// Write pointer of the CPU-to-GSP command queue, which the driver advances. A write to this
+    /// register also interrupts the GSP, so this register is also the doorbell.
     pub(super) NV_PGSP_QUEUE_HEAD(u32) @ 0x00110c00 {
+        31:0    address;
+    }
+
+    /// Read pointer of the CPU-to-GSP command queue, which the GSP advances.
+    pub(super) NV_PGSP_QUEUE_TAIL(u32) @ 0x00110c04 {
+        31:0    address;
+    }
+
+    /// Write pointer of the GSP-to-CPU message queue, which the GSP advances.
+    pub(super) NV_PGSP_MSGQ_HEAD(u32) @ 0x00110c80 {
+        31:0    address;
+    }
+
+    /// Read pointer of the GSP-to-CPU message queue, which the driver advances.
+    pub(super) NV_PGSP_MSGQ_TAIL(u32) @ 0x00110c84 {
         31:0    address;
     }
 }
