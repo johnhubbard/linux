@@ -44,6 +44,10 @@ pub(crate) mod sec2;
 /// Alignment (in bytes) of falcon memory blocks.
 pub(crate) const MEM_BLOCK_ALIGNMENT: usize = 256;
 
+/// `MAILBOX0` value that means "the falcon binary has not started". A binary that runs replaces
+/// it with its own status.
+pub(crate) const FLCN_ERR_BINARY_NOT_STARTED: u32 = 0xfe;
+
 /// DMEM virtual address value that means "no virtual address assigned".
 const FLCN_DMEM_VA_INVALID: u32 = 0xffff_ffff;
 
@@ -156,7 +160,6 @@ pub(crate) enum FalconDmaSrcOffset {
 impl FalconDmaSrcOffset {
     /// Returns the source offset of a DMEM image at virtual address `dmem_va`, or the start of the
     /// source when `dmem_va` is `FLCN_DMEM_VA_INVALID`.
-    #[expect(dead_code)]
     pub(crate) fn from_dmem_va(dmem_va: u32) -> Self {
         if dmem_va == FLCN_DMEM_VA_INVALID {
             Self::Offset(0)
@@ -189,6 +192,17 @@ bounded_enum! {
         Virtual = 0,
         /// Physical memory addresses.
         Physical = 1,
+    }
+}
+
+bounded_enum! {
+    /// Engine ID that the falcon's framebuffer interface (FBIF) tags a DMA transfer with.
+    #[derive(Debug, Copy, Clone)]
+    pub(crate) enum FalconFbifEngineIdFlag with From<Bounded<u32, 1>> {
+        /// The BAR2 engine ID of PCI function 0.
+        Bar2Fn0 = 0,
+        /// The falcon's own engine ID.
+        Own = 1,
     }
 }
 
@@ -394,7 +408,7 @@ pub(crate) struct Falcon<'a, E: FalconEngine> {
     bar: Bar0<'a>,
     // TODO: make private
     pub(crate) pfalcon: Mmio<'a, PFalconRegisters>,
-    pfalcon2: Mmio<'a, PFalcon2Registers>,
+    pub(crate) pfalcon2: Mmio<'a, PFalcon2Registers>,
 }
 
 impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
@@ -627,6 +641,37 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
         Ok(())
     }
 
+    /// Programs FBIF context DMA slot `ctx_dma` with the value that `configure` returns, runs `f`,
+    /// and restores the slot once `f` has returned `Ok`.
+    ///
+    /// The slot keeps the programmed value if `f` fails, since a falcon that `f` started and that
+    /// has not halted may still be reading through the aperture.
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` if `ctx_dma` is not a context DMA slot that the falcon has.
+    ///
+    /// Errors from `f` are propagated as-is.
+    pub(crate) fn with_fbif_transcfg<R>(
+        &self,
+        ctx_dma: u32,
+        configure: impl FnOnce(regs::NV_PFALCON_FBIF_TRANSCFG) -> regs::NV_PFALCON_FBIF_TRANSCFG,
+        f: impl FnOnce() -> Result<R>,
+    ) -> Result<R> {
+        // The location type is not `Copy`, so each register access builds its own.
+        let transcfg =
+            || regs::NV_PFALCON_FBIF_TRANSCFG::try_at(usize::from_safe_cast(ctx_dma)).ok_or(EINVAL);
+
+        let saved = self.pfalcon.read(transcfg()?);
+        self.pfalcon.update(transcfg()?, configure);
+
+        let result = f()?;
+
+        self.pfalcon.update(transcfg()?, |_| saved);
+
+        Ok(result)
+    }
+
     /// Transfers `len` bytes from `src_addr` into this falcon's `target_mem`.
     ///
     /// `src_addr` is a GPU physical address reached through the FBIF aperture, so the caller must
@@ -638,7 +683,6 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
     ///   not a multiple of [`MEM_BLOCK_ALIGNMENT`].
     /// - `ERANGE` if `src_addr` does not fit the `DMATRFBASE` register pair.
     /// - `EOVERFLOW` if a per-block source or destination offset exceeds `u32`.
-    #[expect(dead_code)]
     pub(crate) fn raw_dma_transfer(
         &self,
         ctx_dma: u32,
@@ -788,7 +832,6 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
     /// # Errors
     ///
     /// - `ETIMEDOUT` if the core has not suspended within two seconds.
-    #[expect(dead_code)]
     pub(crate) fn wait_for_processor_suspend(&self) -> Result {
         read_poll_timeout(
             || Ok(self.is_processor_suspended()),
