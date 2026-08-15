@@ -245,6 +245,25 @@ pub(crate) enum OorArch {
     Riscv64 = 5,
 }
 
+impl OorArch {
+    /// Returns the variant naming the architecture this kernel is built for.
+    fn host() -> Self {
+        if cfg!(target_arch = "x86_64") {
+            Self::X86_64
+        } else if cfg!(target_arch = "aarch64") {
+            Self::Aarch64
+        } else if cfg!(target_arch = "powerpc64") {
+            Self::Ppc64le
+        } else if cfg!(target_arch = "arm") {
+            Self::Arm
+        } else if cfg!(target_arch = "riscv64") {
+            Self::Riscv64
+        } else {
+            Self::None
+        }
+    }
+}
+
 // TODO[FPRI]: This is a temporary solution to be replaced with the corresponding derive macros once
 // they land.
 impl TryFrom<u32> for OorArch {
@@ -271,7 +290,7 @@ impl From<OorArch> for u32 {
 
 nvkv_encode! {
     /// A GSP registry entry.
-    struct RegKey {
+    pub(crate) struct RegKey {
         key_name: Key<&'static [u8], { Self::REGKEY_NAME_KEY }>,
         key_value: Key<u32, { Self::REGKEY_VALUE_U32_KEY }>,
     }
@@ -280,6 +299,15 @@ nvkv_encode! {
 impl RegKey {
     const REGKEY_NAME_KEY: KeyId = 0x3070;
     const REGKEY_VALUE_U32_KEY: KeyId = 0x3071;
+
+    /// Creates a registry entry. `key_name` must include its NULL terminator, which GSP-RM counts
+    /// in the encoded name length.
+    pub(crate) fn new(key_name: &'static [u8], key_value: u32) -> Self {
+        Self {
+            key_name: key_name.into(),
+            key_value: key_value.into(),
+        }
+    }
 }
 
 impl Encodeable for KVVec<RegKey> {
@@ -317,7 +345,7 @@ impl VfInfo {
 nvkv_encode! {
     /// Payload of the `GSP_INIT` command.
     #[cfg_attr(not(CONFIG_KUNIT), allow(dead_code))]
-    struct GspInitRequest {
+    pub(crate) struct GspInitRequest {
         pci_device_id: Key<u32, { Self::PCI_DEVICE_ID_KEY }>,
         pci_sub_device_id: Key<u32, { Self::PCI_SUBDEVICE_ID_KEY }>,
         pci_revision_id: Key<u32, { Self::PCI_REVISION_ID_KEY }>,
@@ -330,6 +358,27 @@ nvkv_encode! {
     }
 }
 
+bitfield! {
+    /// PCI bus, device and function, packed the way `PCI_DEVID` packs them, which is what
+    /// [`pci::Device::dev_id`] returns.
+    struct PciDevId(u16) {
+        15:8 bus;
+        7:3 device;
+        2:0 function;
+    }
+}
+
+bitfield! {
+    /// A GPU's PCI location, encoded the way GSP-RM decodes it, matching Open RM's
+    /// `gpuEncodeDomainBusDevice`. Despite the name GSP-RM gives the key, the function number
+    /// is not part of it.
+    struct DomainBusDevice(u64) {
+        63:32 domain;
+        15:8 bus;
+        7:0 device;
+    }
+}
+
 #[cfg_attr(not(CONFIG_KUNIT), allow(dead_code))]
 impl GspInitRequest {
     const PCI_DEVICE_ID_KEY: KeyId = 0x0001;
@@ -339,6 +388,37 @@ impl GspInitRequest {
     const PCI_CONFIG_MIRROR_SIZE_KEY: KeyId = 0x0011;
     const OOR_ARCH_KEY: KeyId = 0x0070;
     const NV_DOMAIN_BUS_DEVICE_FUNC_KEY: KeyId = 0x1020;
+
+    /// Describes `dev` to GSP-RM and asks it to apply `regkeys`.
+    ///
+    /// The same identifiers reach GSP-RM through [`GspSetSystemInfo::init`] on the RPC path.
+    pub(crate) fn new(
+        dev: &pci::Device<device::Bound>,
+        chipset: Chipset,
+        regkeys: KVVec<RegKey>,
+    ) -> Self {
+        let mirror = chipset.pci_config_mirror_range();
+        let dev_id = PciDevId::from(dev.dev_id());
+        let bus_device_func = DomainBusDevice::zeroed()
+            .with_domain(dev.domain_nr())
+            .with_bus(u8::from(dev_id.bus()))
+            .with_device(u8::from(dev_id.device()));
+        let device_id = (u32::from(dev.device_id()) << 16) | u32::from(dev.vendor_id().as_raw());
+        let sub_device_id =
+            (u32::from(dev.subsystem_device_id()) << 16) | u32::from(dev.subsystem_vendor_id());
+
+        Self {
+            pci_device_id: device_id.into(),
+            pci_sub_device_id: sub_device_id.into(),
+            pci_revision_id: u32::from(dev.revision_id()).into(),
+            pci_config_mirror_base: mirror.start.into(),
+            pci_config_mirror_size: (mirror.end - mirror.start).into(),
+            oor_arch: OorArch::host().into(),
+            bus_device_func: u64::from(bus_device_func).into(),
+            regkeys,
+            vf_info: None,
+        }
+    }
 }
 
 // Decode:
