@@ -41,19 +41,6 @@ pub(super) trait GspHal: Send {
         ctx: &mut GspBootContext<'_, '_>,
         gsp_fw: &GspFirmware,
     ) -> Result<Option<crate::gsp::UnloadBundle>>;
-
-    /// Performs HAL-specific post-GSP boot tasks.
-    ///
-    /// This method is called by the GSP boot code after the GSP is confirmed to be running, and
-    /// after the initialization commands have been pushed onto its queue.
-    fn post_boot(
-        &self,
-        _gsp: &Gsp,
-        _ctx: &mut GspBootContext<'_, '_>,
-        _gsp_fw: &GspFirmware,
-    ) -> Result {
-        Ok(())
-    }
 }
 
 /// Returns the names of the firmware files required to boot the GSP of `chipset`, in addition to
@@ -73,6 +60,15 @@ pub(crate) const fn boot_firmware_files(chipset: Chipset) -> &'static [&'static 
             &["fmc.tlv"]
         }
     }
+}
+
+/// Returns `true` if GSP-RM on `chipset` loads its images through the generic falcon bootloader.
+///
+/// Turing and GA100 raise `GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER` during boot and need the
+/// `gen_bootloader.tlv` image to service it. GA102 and later raise `GMCAPI_CMD_EXEC_HS_BINARY`
+/// instead, and [`boot_firmware_files`] ships them no such image.
+pub(super) const fn uses_generic_bootloader(chipset: Chipset) -> bool {
+    matches!(chipset.arch(), Architecture::Turing) || matches!(chipset, Chipset::GA100)
 }
 
 /// Returns the GSP HAL to be used for `chipset`.

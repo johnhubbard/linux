@@ -343,7 +343,7 @@ impl<'a> GspSequencer<'a> {
         libos: &'a Coherent<[LibosMemoryRegionInitArgument]>,
         bootloader_app_version: u32,
     ) -> Result {
-        let seq_info = cmdq.await_msg::<GspSequence>()?;
+        let seq_info = cmdq.await_msg::<GspSequence>(ctx.bar)?;
 
         let sequencer = GspSequencer {
             bar: ctx.bar,

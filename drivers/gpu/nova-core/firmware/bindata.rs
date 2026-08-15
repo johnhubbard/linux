@@ -21,7 +21,6 @@ use crate::{
 /// A missing metadata file is reported as [`None`] so that the eventual caller can decide whether
 /// ucodes are optional for its boot path. Once the metadata has been found, all parse and payload
 /// loading errors, including a missing referenced file, are returned as errors.
-#[expect(dead_code)]
 pub(crate) fn request_ucodes_firmware(
     dev: &device::Device,
     chipset: Chipset,
