@@ -54,6 +54,7 @@ use crate::{
     driver::Bar0,
     gsp::{
         fw::{
+            GspGmcMsgElement,
             GspMsgElement,
             MsgFunction,
             MsgqRxHeader,
@@ -784,6 +785,50 @@ impl CmdqInner<'_> {
         self.poisoned.set(true);
 
         EIO
+    }
+
+    /// Sends a GMC API request to the GSP.
+    ///
+    /// `payload` follows the GMC header on the wire, and `max_response_size` is the largest
+    /// response the caller accepts. The request takes the next sequence number, which GSP-RM
+    /// copies into its response. The number is spent even if the send fails.
+    ///
+    /// # Errors
+    ///
+    /// - `EMSGSIZE` if the request exceeds the maximum queue element size.
+    /// - `ETIMEDOUT` if queue space does not become available within the timeout.
+    /// - `EIO` if the element header is not properly aligned.
+    #[expect(dead_code)]
+    fn send_gmc(&mut self, command_id: u32, payload: &[u8], max_response_size: u32) -> Result {
+        let seq = self.seq;
+        self.seq = self.seq.wrapping_add(1);
+
+        let dst = self
+            .gsp_mem
+            .allocate_command::<GspGmcMsgElement>(payload.len(), Self::ALLOCATE_TIMEOUT)?;
+
+        let msg_element =
+            GspGmcMsgElement::init(command_id, u64::from(seq), payload.len(), max_response_size);
+        // SAFETY: `dst.header` points to a valid, writable `GspGmcMsgElement` region.
+        unsafe {
+            msg_element.__init(core::ptr::from_mut(dst.header))?;
+        }
+
+        SBufferIter::new_writer([&mut dst.contents.0[..], &mut dst.contents.1[..]])
+            .write_all(payload)?;
+
+        dev_dbg!(
+            &self.dev,
+            "GSP GMC: send: seq# {}, command_id=0x{:x}, length=0x{:x}\n",
+            seq,
+            command_id,
+            dst.header.length(),
+        );
+
+        let elem_count = dst.header.element_count();
+        self.gsp_mem.advance_cpu_write_ptr(elem_count);
+
+        Ok(())
     }
 
     /// Wait for a message to become available on the message queue.

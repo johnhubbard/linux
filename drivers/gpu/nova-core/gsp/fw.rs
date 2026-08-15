@@ -1030,7 +1030,6 @@ static_assert!(
     size_of::<GspGmcMsgElement>() == size_of::<QueueElementHeader>() + size_of::<GmcApiHeader>()
 );
 
-#[expect(dead_code)]
 impl GspGmcMsgElement {
     /// Creates the headers of a request that carries `payload_size` bytes of payload.
     ///
