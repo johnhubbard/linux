@@ -141,7 +141,6 @@ pub(crate) enum FalconMem {
 }
 
 /// Source offset of a raw falcon DMA transfer, added to the DMA base address.
-#[expect(dead_code)]
 #[derive(Copy, Clone)]
 pub(crate) enum FalconDmaSrcOffset {
     /// Byte offset from the DMA base address.
@@ -175,6 +174,17 @@ bounded_enum! {
         Virtual = 0,
         /// Physical memory addresses.
         Physical = 1,
+    }
+}
+
+bounded_enum! {
+    /// Engine ID a falcon DMA transfer is tagged with on its way through the FBIF.
+    #[derive(Debug, Copy, Clone)]
+    pub(crate) enum FalconFbifEngineIdFlag with From<Bounded<u32, 1>> {
+        /// Function 0's BAR2 engine ID.
+        Bar2Fn0 = 0,
+        /// The falcon's own engine ID.
+        Own = 1,
     }
 }
 
@@ -631,7 +641,6 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
     ///   an IMEM target.
     /// - `ERANGE` if `src_addr` does not fit the `DMATRFBASE` register pair.
     /// - `EOVERFLOW` if a per-block source or destination offset exceeds `u32`.
-    #[expect(dead_code)]
     pub(crate) fn raw_dma_transfer(
         &self,
         ctx_dma: u8,
@@ -788,7 +797,6 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
     ///
     /// The caller must write `MAILBOX0` before starting the core, or this returns as soon as it
     /// reads the previous suspend.
-    #[expect(dead_code)]
     pub(crate) fn wait_for_processor_suspend(&self) -> Result {
         read_poll_timeout(
             || Ok(self.is_processor_suspended()),

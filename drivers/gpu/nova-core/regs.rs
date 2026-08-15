@@ -18,6 +18,7 @@ use crate::{
         FalconCoreRev,
         FalconCoreRevSubversion,
         FalconEngine,
+        FalconFbifEngineIdFlag,
         FalconFbifMemType,
         FalconFbifTarget,
         FalconMem,
@@ -276,6 +277,7 @@ register! {
     }
 
     pub(crate) NV_PFALCON_FBIF_TRANSCFG(u32)[8] @ PFalconBase + 0x00000600 {
+        16:16   engine_id_flag => FalconFbifEngineIdFlag;
         2:2     mem_type => FalconFbifMemType;
         1:0     target ?=> FalconFbifTarget;
     }
