@@ -621,19 +621,38 @@ impl<'cmdq> Cmdq<'cmdq> {
         self.inner.lock().send_command(command)
     }
 
-    /// Receives one GMC event and passes its command id and payload slices to `handler`.
+    /// Waits for the response to the GMC request with command id `command_id`, and passes every
+    /// other GMC element that arrives first to `on_other`.
     ///
-    /// This method may sleep while waiting. The queue mutex stays locked across the wait and the
-    /// `handler` call, so `handler` must not call back into this [`Cmdq`].
+    /// This method may sleep while waiting. The queue mutex stays locked across the whole wait and
+    /// across the `on_other` and `decode` calls, so neither may call back into this [`Cmdq`].
     ///
-    /// See [`CmdqInner::receive_gmc_and_dispatch`] for the return value and the errors.
-    #[expect(dead_code)]
-    pub(crate) fn receive_gmc_and_dispatch<R>(
+    /// See [`CmdqInner::await_gmc_response`] for the return value and the errors.
+    pub(crate) fn await_gmc_response<R>(
         &self,
-        timeout: Delta,
-        handler: impl FnOnce(u32, &[u8], &[u8]) -> Result<Option<R>>,
-    ) -> Result<Option<R>> {
-        self.inner.lock().receive_gmc_and_dispatch(timeout, handler)
+        command_id: u32,
+        on_other: impl FnMut(&GspGmcMsgElement, &[u8], &[u8]) -> Result,
+        decode: impl FnMut(&[u8], &[u8]) -> Result<R>,
+    ) -> Result<R> {
+        self.inner
+            .lock()
+            .await_gmc_response(command_id, on_other, decode)
+    }
+
+    /// Sends a GMC API request to the GSP without waiting for the response.
+    ///
+    /// # Errors
+    ///
+    /// Errors from [`DmaGspMem::allocate_command`] are propagated as-is.
+    pub(crate) fn send_gmc_no_wait(
+        &self,
+        command_id: u32,
+        payload: &[u8],
+        max_response_size: u32,
+    ) -> Result {
+        self.inner
+            .lock()
+            .send_gmc(command_id, payload, max_response_size)
     }
 
     /// Waits for an unsolicited GSP event of type `M`. Events that arrive before it are logged and
@@ -794,7 +813,6 @@ impl CmdqInner<'_> {
     /// # Errors
     ///
     /// Errors from [`DmaGspMem::allocate_command`] are propagated as-is.
-    #[expect(dead_code)]
     fn send_gmc(&mut self, command_id: u32, payload: &[u8], max_response_size: u32) -> Result {
         let seq = self.seq;
         self.seq = self.seq.wrapping_add(1);
@@ -1175,8 +1193,9 @@ impl CmdqInner<'_> {
 
     /// Receives the next queue element and, if it is a GMC element, passes it to `handler`.
     ///
-    /// `handler` receives the command id and the payload that follows the GMC API header, as two
-    /// slices because the ring may wrap, and returns `None` for an element that it declines.
+    /// `handler` receives the headers that open the element and the payload that follows the GMC
+    /// API header, as two slices because the ring may wrap, and returns `None` for an element that
+    /// it declines.
     ///
     /// Returns `Ok(None)` when `handler` declines the element or when the element is not a GMC
     /// element.
@@ -1190,7 +1209,7 @@ impl CmdqInner<'_> {
     fn receive_gmc_and_dispatch<R>(
         &mut self,
         timeout: Delta,
-        handler: impl FnOnce(u32, &[u8], &[u8]) -> Result<Option<R>>,
+        handler: impl FnOnce(&GspGmcMsgElement, &[u8], &[u8]) -> Result<Option<R>>,
     ) -> Result<Option<R>> {
         self.consume_element(timeout, |this, element| match element {
             QueueElement::Other(_) => {
@@ -1200,18 +1219,73 @@ impl CmdqInner<'_> {
             }
             QueueElement::Gmc(message) => {
                 let header = message.header;
-                let command_id = header.gmc.command_id();
 
                 dev_dbg!(
                     &this.dev,
                     "GSP GMC: event: seq# {}, command_id=0x{:x}, length=0x{:x}\n",
                     header.gmc.sequence,
-                    command_id,
+                    header.gmc.command_id(),
                     header.length(),
                 );
 
-                handler(command_id, message.contents.0, message.contents.1)
+                handler(header, message.contents.0, message.contents.1)
             }
         })
+    }
+
+    /// Waits for the response to the GMC request with command id `command_id`, up to
+    /// [`Cmdq::RECEIVE_TIMEOUT`] from the call.
+    ///
+    /// The response's payload is passed to `decode`, as two slices because the ring may wrap.
+    /// Every other GMC element that arrives first is passed to `on_other` with the headers that
+    /// open it and its payload slices, and any other element is logged. Neither kind of element
+    /// extends the deadline.
+    ///
+    /// # Errors
+    ///
+    /// - `ETIMEDOUT` if the response does not arrive before the deadline, however many other
+    ///   elements arrive while waiting.
+    /// - `EIO` if an element fails framing validation (see [`Self::wait_for_element`]), or if
+    ///   the response carries a failure status.
+    ///
+    /// Errors from `on_other` and `decode` are propagated as-is.
+    fn await_gmc_response<R>(
+        &mut self,
+        command_id: u32,
+        mut on_other: impl FnMut(&GspGmcMsgElement, &[u8], &[u8]) -> Result,
+        mut decode: impl FnMut(&[u8], &[u8]) -> Result<R>,
+    ) -> Result<R> {
+        let dev = self.dev;
+        let deadline = Instant::<Monotonic>::now() + Cmdq::RECEIVE_TIMEOUT;
+        loop {
+            let remaining = deadline - Instant::<Monotonic>::now();
+            if remaining.is_negative() {
+                break Err(ETIMEDOUT);
+            }
+
+            let response =
+                self.receive_gmc_and_dispatch(remaining, |header, payload_0, payload_1| {
+                    if header.gmc.command_id() != command_id {
+                        return on_other(header, payload_0, payload_1).map(|()| None);
+                    }
+
+                    let status = header.gmc.status();
+                    if status != 0 {
+                        dev_err!(
+                            dev,
+                            "GSP GMC: command 0x{:x} failed, status={:#x}\n",
+                            command_id,
+                            status
+                        );
+                        return Err(EIO);
+                    }
+
+                    decode(payload_0, payload_1).map(Some)
+                })?;
+
+            if let Some(response) = response {
+                break Ok(response);
+            }
+        }
     }
 }
