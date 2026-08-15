@@ -50,6 +50,11 @@ use crate::{
         cmdq::Cmdq, //
         GSP_PAGE_SIZE,
     },
+    mctp::{
+        MctpHeader,
+        NvdmHeader,
+        NvdmType, //
+    },
     num::{
         self,
         FromSafeCast, //
@@ -888,6 +893,245 @@ unsafe impl AsBytes for GspMsgElement {}
 // SAFETY: This struct only contains integer types for which all bit patterns
 // are valid.
 unsafe impl FromBytes for GspMsgElement {}
+
+/// First word of every queue element: `"MCTP"` in ASCII.
+const MCTP_MAGIC: u32 = 0x4D43_5450;
+
+/// The queue element header that opens every queue element, whatever kind of message follows.
+///
+/// It holds an MCTP (Management Component Transport Protocol) header and an NVDM (NVIDIA
+/// vendor-defined message) header. The NVDM type selects the message header that follows: the RPC
+/// header or the GMC (GPU Management Controller) API header.
+///
+/// ```text
+///     +------------------------------------+
+///     | queue element header               |  QueueElementHeader: magic, element length, MCTP
+///     |                                    |  header, NVDM header, message length
+///     +------------------------------------+
+///     | message header                     |  the RPC header or the GMC API header. The NVDM
+///     +------------------------------------+  type selects between the two.
+///     | payload                            |  command-specific data
+///     +------------------------------------+
+/// ```
+#[repr(C)]
+pub(crate) struct QueueElementHeader {
+    magic: u32,
+    /// Length of the whole element: the queue element header, the message header and the
+    /// payload. Open RM calls it `mctpPayloadSize`.
+    element_len: u32,
+    mctp: MctpHeader,
+    nvdm: NvdmHeader,
+    /// Length of the message header and the payload, the queue element header excluded. Open RM
+    /// calls it `nvdmPayloadSize`.
+    message_len: u32,
+    reserved: u32,
+}
+
+static_assert!(
+    core::mem::offset_of!(QueueElementHeader, magic)
+        == core::mem::offset_of!(r000_00::GSP_MSG_QUEUE_ELEMENT, mctpMagic)
+);
+static_assert!(
+    core::mem::offset_of!(QueueElementHeader, element_len)
+        == core::mem::offset_of!(r000_00::GSP_MSG_QUEUE_ELEMENT, mctpPayloadSize)
+);
+static_assert!(
+    core::mem::offset_of!(QueueElementHeader, mctp)
+        == core::mem::offset_of!(r000_00::GSP_MSG_QUEUE_ELEMENT, mctpHeader)
+);
+static_assert!(
+    core::mem::offset_of!(QueueElementHeader, nvdm)
+        == core::mem::offset_of!(r000_00::GSP_MSG_QUEUE_ELEMENT, nvdmHeader)
+);
+static_assert!(
+    core::mem::offset_of!(QueueElementHeader, message_len)
+        == core::mem::offset_of!(r000_00::GSP_MSG_QUEUE_ELEMENT, __bindgen_anon_1)
+            + core::mem::offset_of!(
+                r000_00::GSP_MSG_QUEUE_ELEMENT__bindgen_ty_1__bindgen_ty_2,
+                nvdmPayloadSize
+            )
+);
+static_assert!(
+    core::mem::offset_of!(QueueElementHeader, reserved)
+        == core::mem::offset_of!(r000_00::GSP_MSG_QUEUE_ELEMENT, __bindgen_anon_1)
+            + core::mem::offset_of!(
+                r000_00::GSP_MSG_QUEUE_ELEMENT__bindgen_ty_1__bindgen_ty_2,
+                reserved
+            )
+);
+// The bindings size the element for the encrypted tail. The unencrypted layout ends after the
+// two length words, as `GSP_MSG_QUEUE_ELEMENT_SIZE_NO_ENCRYPTION` in Open RM defines it.
+static_assert!(
+    size_of::<QueueElementHeader>()
+        == core::mem::offset_of!(r000_00::GSP_MSG_QUEUE_ELEMENT, __bindgen_anon_1)
+            + size_of::<r000_00::GSP_MSG_QUEUE_ELEMENT__bindgen_ty_1__bindgen_ty_2>()
+);
+
+#[expect(dead_code)]
+impl QueueElementHeader {
+    /// Builds the queue element header of an element whose message header and payload together
+    /// take `message_len` bytes.
+    ///
+    /// # Errors
+    ///
+    /// - `EOVERFLOW` if a length does not fit its 32-bit field.
+    fn new(nvdm: NvdmType, message_len: usize) -> Result<Self> {
+        Ok(Self {
+            magic: MCTP_MAGIC,
+            element_len: size_of::<Self>()
+                .checked_add(message_len)
+                .ok_or(EOVERFLOW)?
+                .try_into()
+                .map_err(|_| EOVERFLOW)?,
+            mctp: MctpHeader::single_packet(),
+            nvdm: NvdmHeader::new(nvdm),
+            message_len: message_len.try_into().map_err(|_| EOVERFLOW)?,
+            reserved: 0,
+        })
+    }
+
+    /// Returns the length of the whole element, the queue element header included.
+    fn element_len(&self) -> usize {
+        num::u32_as_usize(self.element_len)
+    }
+
+    /// Returns the length of the payload that follows a message header of `message_header_len`
+    /// bytes, or `None` if the message length in the queue element header is shorter than that
+    /// header.
+    fn payload_len(&self, message_header_len: usize) -> Option<usize> {
+        num::u32_as_usize(self.message_len).checked_sub(message_header_len)
+    }
+
+    /// Returns the number of queue slots that this element occupies.
+    fn element_count(&self) -> u32 {
+        self.element_len
+            .div_ceil(num::usize_into_u32::<GSP_PAGE_SIZE>())
+    }
+}
+
+// SAFETY: All fields are integer types or transparent wrappers over one, with no padding.
+unsafe impl AsBytes for QueueElementHeader {}
+
+// SAFETY: All fields are integer types for which all bit patterns are valid.
+unsafe impl FromBytes for QueueElementHeader {}
+
+/// Header of a GMC API message.
+#[repr(C)]
+#[derive(Zeroable)]
+pub(crate) struct GmcApiHeader {
+    /// Command id in the low three bytes, flags in the high byte.
+    pub(crate) command: u32,
+    /// Payload size in bytes.
+    pub(crate) size: u32,
+    /// Sequence number that GSP-RM copies from a request into its response.
+    pub(crate) sequence: u64,
+    /// In a request, the largest response that the sender accepts. In a response, the `NV_STATUS`.
+    pub(crate) max_resp_or_status: u32,
+    reserved: [u32; 5],
+}
+
+static_assert!(size_of::<GmcApiHeader>() == size_of::<r000_00::GMCAPI_HEADER>());
+static_assert!(
+    core::mem::offset_of!(GmcApiHeader, command)
+        == core::mem::offset_of!(r000_00::GMCAPI_HEADER, command)
+);
+static_assert!(
+    core::mem::offset_of!(GmcApiHeader, size)
+        == core::mem::offset_of!(r000_00::GMCAPI_HEADER, size)
+);
+static_assert!(
+    core::mem::offset_of!(GmcApiHeader, sequence)
+        == core::mem::offset_of!(r000_00::GMCAPI_HEADER, sequence)
+);
+static_assert!(
+    core::mem::offset_of!(GmcApiHeader, max_resp_or_status)
+        == core::mem::offset_of!(r000_00::GMCAPI_HEADER, __bindgen_anon_1)
+);
+static_assert!(
+    core::mem::offset_of!(GmcApiHeader, reserved)
+        == core::mem::offset_of!(r000_00::GMCAPI_HEADER, reserved)
+);
+
+impl GmcApiHeader {
+    /// Returns the `NV_STATUS` that a response carries.
+    ///
+    /// The value is meaningful only on a response, which GSP-RM marks with a flag in the command
+    /// word. In a request, the same word holds the largest response that the sender accepts.
+    #[expect(dead_code)]
+    pub(crate) fn status(&self) -> u32 {
+        self.max_resp_or_status
+    }
+}
+
+// SAFETY: All fields are integer types with no uninitialized padding bytes.
+unsafe impl AsBytes for GmcApiHeader {}
+
+// SAFETY: All fields are integer types for which all bit patterns are valid.
+unsafe impl FromBytes for GmcApiHeader {}
+
+/// The headers that open a GMC API queue element: the queue element header and the GMC API
+/// header.
+#[repr(C)]
+pub(crate) struct GspGmcMsgElement {
+    element_header: QueueElementHeader,
+    pub(crate) gmc: GmcApiHeader,
+}
+
+// `AsBytes` below requires that no padding separates the two headers.
+static_assert!(
+    size_of::<GspGmcMsgElement>() == size_of::<QueueElementHeader>() + size_of::<GmcApiHeader>()
+);
+
+#[expect(dead_code)]
+impl GspGmcMsgElement {
+    /// Creates the queue element header and the GMC API header of a request that carries
+    /// `payload_size` bytes of payload.
+    ///
+    /// `max_response_size` is the largest response that the sender accepts, and zero for a request
+    /// that GSP-RM does not answer.
+    ///
+    /// # Errors
+    ///
+    /// - `EOVERFLOW` if a length does not fit its 32-bit field.
+    pub(crate) fn init(
+        command_id: u32,
+        sequence: u64,
+        payload_size: usize,
+        max_response_size: u32,
+    ) -> impl Init<Self, Error> {
+        try_init!(GspGmcMsgElement {
+            element_header: QueueElementHeader::new(
+                NvdmType::GmcApi,
+                size_of::<GmcApiHeader>()
+                    .checked_add(payload_size)
+                    .ok_or(EOVERFLOW)?,
+            )?,
+            gmc: GmcApiHeader {
+                command: command_id,
+                size: payload_size.try_into().map_err(|_| EOVERFLOW)?,
+                sequence,
+                max_resp_or_status: max_response_size,
+                reserved: [0; 5],
+            },
+        })
+    }
+
+    /// Returns the length of the whole element, both headers included.
+    pub(crate) fn length(&self) -> usize {
+        self.element_header.element_len()
+    }
+
+    /// Returns the number of queue slots that this element occupies.
+    pub(crate) fn element_count(&self) -> u32 {
+        self.element_header.element_count()
+    }
+}
+
+// SAFETY: All fields are integer types with no uninitialized padding bytes.
+unsafe impl AsBytes for GspGmcMsgElement {}
+
+// SAFETY: All fields are integer types for which all bit patterns are valid.
+unsafe impl FromBytes for GspGmcMsgElement {}
 
 /// Arguments for GSP startup.
 #[repr(transparent)]
