@@ -247,6 +247,11 @@ register! {
         31:0    value => u32;
     }
 
+    pub(crate) NV_PFALCON_FALCON_HWCFG(u32) @ PFalconBase + 0x00000108 {
+        /// Size of this falcon's IMEM, in blocks of [`crate::falcon::MEM_BLOCK_ALIGNMENT`] bytes.
+        8:0     imem_size;
+    }
+
     pub(crate) NV_PFALCON_FALCON_DMACTL(u32) @ PFalconBase + 0x0000010c {
         7:7     secure_stat => bool;
         6:3     dmaq_num;

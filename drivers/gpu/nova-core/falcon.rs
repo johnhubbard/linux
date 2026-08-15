@@ -387,6 +387,21 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
         })
     }
 
+    /// Returns the size of this falcon's IMEM, in bytes.
+    ///
+    /// `NV_PFALCON_FALCON_IMEMC` addresses IMEM with a 16-bit byte offset, so the result never
+    /// exceeds 64KiB.
+    pub(crate) fn imem_size(&self) -> usize {
+        let blocks = usize::from_safe_cast(
+            *self
+                .bar
+                .read(regs::NV_PFALCON_FALCON_HWCFG::of::<E>())
+                .imem_size(),
+        );
+
+        blocks * MEM_BLOCK_ALIGNMENT
+    }
+
     /// Resets DMA-related registers.
     pub(crate) fn dma_reset(&self) {
         self.bar.update(regs::NV_PFALCON_FBIF_CTL::of::<E>(), |v| {
