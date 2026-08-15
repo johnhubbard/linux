@@ -6,7 +6,6 @@ use kernel::{
         Coherent,
         DmaAddress, //
     },
-    firmware,
     prelude::*,
     str::CString,
 };
@@ -20,8 +19,7 @@ use crate::{
             Tlv,
         },
     },
-    gpu::Chipset,
-    num::FromSafeCast,
+    gpu::Chipset, //
 };
 
 /// GSP firmware with 3-level radix page tables for the GSP bootloader.
@@ -59,19 +57,13 @@ impl GspFirmware {
                 fw_version.to_str().unwrap_or("unknown")
             );
 
-            let size = usize::from_safe_cast(tlv.get_u32(b"SIZE")?);
-            let mut fw_vvec = VVec::zeroed(size, GFP_KERNEL).map_err(|_| ENOMEM)?;
-
-            let chip_name = chipset.name();
-            let file = tlv.get_string(b"FILE")?;
-            let filename = CString::try_from_fmt(fmt!("nvidia/{chip_name}/gsp/{file}"))?;
-            firmware::request_into_buf(&filename, dev, fw_vvec.as_mut_slice())?;
+            let (fw_path, fw_vvec) = tlv.load_file(dev, chipset)?;
 
             let signatures = Coherent::from_slice(dev, tlv.get_bytes(b"SIGN")?, GFP_KERNEL)?;
 
             Ok(try_pin_init!(Self {
                 radix3 <- Radix3::new(dev, fw_vvec),
-                fw_path: filename,
+                fw_path,
                 fw_version,
                 signatures,
                 bootloader: {
