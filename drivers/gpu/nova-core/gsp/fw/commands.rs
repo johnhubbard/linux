@@ -455,10 +455,7 @@ impl GspInitRequest {
 // Should decode with UnknownKeyPolicy::Ignore.
 nvkv_decode! {
     /// Schema for the `GSP_INIT` response.
-    // TODO: expect() doesn't work here due to Self:: reference, fixed in 1.97.0
-    // https://github.com/rust-lang/rust/pull/154377
-    #[cfg_attr(not(CONFIG_KUNIT), allow(dead_code))]
-    struct GspInitResponseSchema => GspInitResponse {
+    pub(crate) struct GspInitResponseSchema => GspInitResponse {
         gpu_name:
             Array<u8, { GspInitResponse::MAX_GPU_NAME_LEN }, { Self::GPU_NAME_STRING_KEY }>,
         fb_regions: Accumulated<FbRegionSchema>,
@@ -475,15 +472,61 @@ impl GspInitResponseSchema {
 }
 
 /// Payload of the `GSP_INIT` response.
-struct GspInitResponse {
+pub(crate) struct GspInitResponse {
     gpu_name: ArrayVec<u8, { Self::MAX_GPU_NAME_LEN }>,
     fb_regions: KVVec<FbRegion>,
     bar1_pde_base: u64,
+    #[cfg_attr(not(CONFIG_KUNIT = "y"), expect(dead_code))]
     vmmu_segment_size: u64,
 }
 
 impl GspInitResponse {
-    const MAX_GPU_NAME_LEN: usize = 64;
+    pub(crate) const MAX_GPU_NAME_LEN: usize = 64;
+
+    /// Tag of a general-purpose region. Any other tag marks a region that GSP-RM reserves for the
+    /// use that the tag names.
+    const FB_REGION_TAG_NONE: u32 = 0;
+
+    /// Returns the GPU name, which GSP-RM sends with its NUL terminator.
+    pub(crate) fn gpu_name(&self) -> &[u8] {
+        self.gpu_name.as_slice()
+    }
+
+    /// Returns an iterator over the FB regions from which the driver may allocate: the
+    /// general-purpose regions that are not protected and that support both compression and
+    /// isochronous access.
+    pub(crate) fn usable_fb_regions(&self) -> impl Iterator<Item = Range<u64>> + '_ {
+        self.fb_regions.iter().filter_map(|region| {
+            if region.limit >= region.base
+                && region.tag == Self::FB_REGION_TAG_NONE
+                && !region.flags.protected()
+                && region.flags.support_compressed()
+                && region.flags.support_iso()
+            {
+                region.limit.checked_add(1).map(|end| region.base..end)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Returns the exclusive end of the FB physical address space, which spans every region
+    /// including the ones that [`Self::usable_fb_regions`] leaves out.
+    ///
+    /// Returns `None` if no region that GSP-RM reported has a limit at or above its base.
+    pub(crate) fn total_fb_end(&self) -> Option<u64> {
+        self.fb_regions
+            .iter()
+            .filter(|region| region.limit >= region.base)
+            .map(|region| region.limit)
+            .max()?
+            .checked_add(1)
+    }
+
+    /// Returns the BAR1 page directory entry base address.
+    pub(crate) fn bar1_pde_base(&self) -> u64 {
+        self.bar1_pde_base
+    }
 }
 
 nvkv_decode! {
