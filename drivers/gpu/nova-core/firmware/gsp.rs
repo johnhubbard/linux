@@ -6,6 +6,7 @@ use kernel::{
         Coherent,
         DmaAddress, //
     },
+    firmware,
     prelude::*,
     str::CString,
 };
@@ -15,8 +16,8 @@ use crate::{
         radix3::Radix3,
         riscv::RiscvFirmware, //
         tlv::{
-            request_tlv, //
-            Tlv,
+            request_tlv,
+            Tlv, //
         },
     },
     gpu::Chipset, //
@@ -46,10 +47,10 @@ impl GspFirmware {
     pub(crate) fn new<'a>(
         dev: &'a device::Device<device::Bound>,
         chipset: Chipset,
+        gsp_tlv: &'a firmware::Firmware,
     ) -> impl PinInit<Self, Error> + 'a {
         pin_init::pin_init_scope(move || {
-            let firmware = request_tlv(dev, chipset, "gsp")?;
-            let tlv = Tlv::new(firmware.data())?;
+            let tlv = Tlv::new(gsp_tlv.data())?;
             let fw_version = CString::try_from_fmt(fmt!("{}", tlv.get_string(b"VERS")?))?;
             dev_dbg!(
                 dev,

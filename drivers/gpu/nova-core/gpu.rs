@@ -396,7 +396,7 @@ impl<'gpu> Gpu<'gpu> {
 
                 vgpu: VgpuManager::new(pdev, spec.chipset, fsp.as_mut()),
 
-                gsp <- Gsp::new(pdev),
+                gsp <- Gsp::new(pdev, spec.chipset),
 
                 // This member must be initialized last, so the `UnloadBundle` can never be dropped
                 // from outside of the constructed `GspResources`, ensuring that the unload sequence
