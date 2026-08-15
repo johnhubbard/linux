@@ -758,6 +758,34 @@ impl MsgqTxHeader {
 // SAFETY: Padding is explicit and does not contain uninitialized data.
 unsafe impl AsBytes for MsgqTxHeader {}
 
+/// TX header that sets up a message queue with the GSP, msgq v2 layout.
+///
+/// Carries the queue geometry and nothing else, because msgq v2 keeps the ring pointers in BAR0.
+#[repr(transparent)]
+pub(crate) struct MsgqTxHeaderV2(r000_00::msgqTxHeader);
+
+#[expect(dead_code)]
+impl MsgqTxHeaderV2 {
+    /// Creates a v2 TX queue header.
+    ///
+    /// `entry_off` is the byte offset from the start of the queue structure to the message data
+    /// array, and `msgq_size` covers that structure in full.
+    pub(crate) fn new(msgq_size: u32, msg_size: u32, msg_count: u32, entry_off: u32) -> Self {
+        Self(r000_00::msgqTxHeader {
+            versionMajor: 2,
+            versionMinor: 0,
+            size: msgq_size,
+            msgSize: msg_size,
+            msgCount: msg_count,
+            entryOff: entry_off,
+            reserved: [0; 3],
+        })
+    }
+}
+
+// SAFETY: Padding is explicit and does not contain uninitialized data.
+unsafe impl AsBytes for MsgqTxHeaderV2 {}
+
 /// RX header for setting up a message queue with the GSP.
 #[repr(transparent)]
 pub(crate) struct MsgqRxHeader(bindings::msgqRxHeader);
