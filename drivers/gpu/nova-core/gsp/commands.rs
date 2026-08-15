@@ -30,7 +30,13 @@ use crate::{
         },
         fw::{
             self,
+            commands::GspInitRequest,
             MsgFunction, //
+        },
+        nvkv::{
+            Encodable,
+            EncodedStream,
+            Encoder, //
         },
     },
     sbuffer::SBufferIter,
@@ -262,6 +268,23 @@ impl GspStaticInfo {
             .to_str()
             .map_err(GpuNameError::InvalidUtf8)
     }
+}
+
+/// Builds the NVKV-encoded payload of a `GSP_INIT` request for `pdev`.
+///
+/// # Errors
+///
+/// - `ENOMEM` if the request or the encoder buffer cannot be allocated.
+#[expect(dead_code)]
+pub(crate) fn build_gsp_init_payload(
+    pdev: &pci::Device<device::Bound>,
+    chipset: Chipset,
+    vgpu_state: VgpuState,
+) -> Result<EncodedStream> {
+    let mut encoder = Encoder::new();
+    GspInitRequest::new(pdev, chipset, vgpu_state)?.encode(&mut encoder)?;
+
+    Ok(encoder.finish())
 }
 
 pub(crate) use fw::commands::PowerStateLevel;
