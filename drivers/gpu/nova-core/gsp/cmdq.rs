@@ -635,12 +635,24 @@ struct GspCommand<'a, H = GspMsgElement> {
 
 /// A message ready to be processed from the message queue.
 ///
-/// This is the type returned by [`Cmdq::wait_for_msg`].
+/// This is the type returned by [`CmdqInner::wait_for_msg`].
 struct GspMessage<'a> {
     // Reference to the header of the message.
     header: &'a GspMsgElement,
     // Slices to the contents of the message. The second slice is zero unless the message loops
     // over the message queue.
+    contents: (&'a [u8], &'a [u8]),
+}
+
+/// A GMC message ready to be processed from the message queue.
+///
+/// This is the type returned by [`CmdqInner::wait_for_gmc_msg`].
+#[expect(dead_code)]
+struct GmcMessage<'a> {
+    // Reference to the header of the message.
+    header: &'a GspGmcMsgElement,
+    // Slices of the payload following the `GmcApiHeader`. The second slice is empty unless the
+    // payload wraps around the end of the message queue.
     contents: (&'a [u8], &'a [u8]),
 }
 
@@ -1267,5 +1279,75 @@ impl CmdqInner {
         }
 
         Ok(())
+    }
+
+    /// Wait for a GMC message to become available on the message queue.
+    ///
+    /// This is the GMC counterpart to [`Self::wait_for_msg`] and reads the same queue. Like that
+    /// method it works purely at the transport layer, validating the MCTP framing and the
+    /// advertised length and nothing else.
+    ///
+    /// Both element kinds open with a [`super::fw::QueueElementHeader`], so a caller that may
+    /// see either must check the NVDM type before it reads the GMC header.
+    ///
+    /// # Errors
+    ///
+    /// - `ETIMEDOUT` if `timeout` has elapsed before any message becomes available.
+    /// - `EIO` if the framing is invalid, or the queue was already poisoned by an earlier such
+    ///   failure. Either failure poisons the queue, so recovery requires a reset.
+    #[expect(dead_code)]
+    fn wait_for_gmc_msg(&self, timeout: Delta) -> Result<GmcMessage<'_>> {
+        if self.poisoned.get() {
+            return Err(EIO);
+        }
+
+        let (slice_1, slice_2) = read_poll_timeout(
+            || Ok(self.gsp_mem.driver_read_area()),
+            |driver_area| !driver_area.0.is_empty(),
+            Delta::from_millis(1),
+            timeout,
+        )
+        .map(|(slice_1, slice_2)| (slice_1.as_flattened(), slice_2.as_flattened()))?;
+
+        let Some((header, slice_1)) = GspGmcMsgElement::from_bytes_prefix(slice_1) else {
+            self.poisoned.set(true);
+            return Err(EIO);
+        };
+
+        if let Err(e) = header.validate_framing() {
+            dev_err!(
+                &self.dev,
+                "GSP GMC: receive: bad MCTP framing, declared length {}\n",
+                header.length(),
+            );
+            self.poisoned.set(true);
+            return Err(e);
+        }
+
+        let payload_length = header.payload_length();
+
+        // Check that the driver read area is large enough for the message.
+        if slice_1.len() + slice_2.len() < payload_length {
+            self.poisoned.set(true);
+            return Err(EIO);
+        }
+
+        // Cut the message slices down to the actual length of the message.
+        let (slice_1, slice_2) = if slice_1.len() > payload_length {
+            // PANIC: we checked above that `slice_1` is at least as long as `payload_length`.
+            (slice_1.split_at(payload_length).0, &slice_2[0..0])
+        } else {
+            (
+                slice_1,
+                // PANIC: we checked above that `slice_1.len() + slice_2.len()` is at least as
+                // large as `payload_length`.
+                slice_2.split_at(payload_length - slice_1.len()).0,
+            )
+        };
+
+        Ok(GmcMessage {
+            header,
+            contents: (slice_1, slice_2),
+        })
     }
 }

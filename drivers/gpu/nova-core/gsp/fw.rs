@@ -978,7 +978,6 @@ static_assert!(
         == core::mem::offset_of!(r000_00::GSP_MSG_QUEUE_ELEMENT, nvdmHeader)
 );
 
-#[expect(dead_code)]
 impl QueueElementHeader {
     /// Builds the header for an element whose message header and payload come to `message_len`
     /// bytes together.
@@ -1015,6 +1014,32 @@ impl QueueElementHeader {
     fn element_count(&self) -> u32 {
         self.element_len
             .div_ceil(num::usize_into_u32::<GSP_PAGE_SIZE>())
+    }
+
+    /// Validates the framing before any length field in the element is trusted.
+    ///
+    /// `header_len` is the size of the decoded element type, and is the shortest length a
+    /// well-formed element can declare.
+    ///
+    /// # Errors
+    ///
+    /// - `EIO` if the magic, the MCTP version or the NVIDIA vendor id is wrong, or if the
+    ///   declared element length lies outside `header_len..=GSP_MSG_QUEUE_ELEMENT_SIZE_MAX`.
+    ///   Every one of these leaves the whole element untrusted, its length fields included.
+    fn validate(&self, header_len: usize) -> Result {
+        if self.magic != MCTP_MAGIC
+            || !self.mctp.has_expected_version()
+            || !self.nvdm.has_nvidia_vendor()
+        {
+            return Err(EIO);
+        }
+
+        let length = self.element_len();
+        if length < header_len || length > GSP_MSG_QUEUE_ELEMENT_SIZE_MAX {
+            return Err(EIO);
+        }
+
+        Ok(())
     }
 }
 
@@ -1107,9 +1132,19 @@ impl GspGmcMsgElement {
         })
     }
 
+    /// Returns the length of the payload that follows the [`GmcApiHeader`].
+    pub(crate) fn payload_length(&self) -> usize {
+        self.transport.payload_len(size_of::<GmcApiHeader>())
+    }
+
     /// Returns the total length of the element, transport and GMC headers included.
     pub(crate) fn length(&self) -> usize {
         self.transport.element_len()
+    }
+
+    /// Validates the transport framing. See [`QueueElementHeader::validate`].
+    pub(crate) fn validate_framing(&self) -> Result {
+        self.transport.validate(size_of::<Self>())
     }
 
     /// Returns the number of queue slots this element occupies.
