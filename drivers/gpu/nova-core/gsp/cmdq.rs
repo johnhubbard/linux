@@ -690,6 +690,7 @@ impl Cmdq {
     ///
     /// - `ETIMEDOUT` if the event does not arrive within [`Self::RECEIVE_TIMEOUT`] of the call,
     ///   however many other events are dispatched while waiting.
+    #[expect(dead_code)]
     pub(crate) fn await_msg<M: MessageFromGsp>(&self, bar: Bar0<'_>) -> Result<M>
     where
         // This allows all error types, including `Infallible`, to be used for `M::InitError`.

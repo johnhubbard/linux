@@ -30,8 +30,6 @@ mod fw;
 #[cfg_attr(not(CONFIG_KUNIT), allow(dead_code))]
 mod nvkv;
 mod regs;
-#[expect(dead_code)]
-mod sequencer;
 
 pub(crate) use fw::{
     GspFmcBootParams,

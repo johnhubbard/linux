@@ -13,10 +13,7 @@ use kernel::{
     device,
     pci,
     prelude::*,
-    transmute::{
-        AsBytes,
-        FromBytes, //
-    }, //
+    transmute::AsBytes, //
 };
 
 use crate::{
@@ -187,32 +184,6 @@ impl CommandToGsp for SetRegistry {
 
         dst.write_all(string_data.as_slice())
     }
-}
-
-/// Message type for GSP initialization done notification.
-struct GspInitDone;
-
-// SAFETY: `GspInitDone` is a zero-sized type with no bytes, therefore it
-// trivially has no uninitialized bytes.
-unsafe impl FromBytes for GspInitDone {}
-
-impl MessageFromGsp for GspInitDone {
-    const FUNCTION: MsgFunction = MsgFunction::GspInitDone;
-    type InitError = Infallible;
-    type Message = ();
-
-    fn read(
-        _msg: &Self::Message,
-        _sbuffer: &mut SBufferIter<array::IntoIter<&[u8], 2>>,
-    ) -> Result<Self, Self::InitError> {
-        Ok(GspInitDone)
-    }
-}
-
-/// Waits for GSP initialization to complete.
-#[expect(dead_code)]
-pub(crate) fn wait_gsp_init_done(cmdq: &Cmdq, bar: Bar0<'_>) -> Result {
-    cmdq.await_msg::<GspInitDone>(bar).map(|_| ())
 }
 
 /// The `GetGspStaticInfo` command.
