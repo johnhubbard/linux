@@ -415,12 +415,6 @@ impl Gsp {
             }))
         })
     }
-
-    /// Query the GSP for the static GPU information.
-    #[expect(dead_code)]
-    pub(crate) fn get_static_info(&self, bar: Bar0<'_>) -> Result<commands::GetGspStaticInfoReply> {
-        self.cmdq.send_command(bar, commands::GetGspStaticInfo)
-    }
 }
 
 /// Opaque bundle required to unload the GSP. Created by [`Gsp::boot`], consumed by [`Gsp::unload`].
