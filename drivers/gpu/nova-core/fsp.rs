@@ -256,7 +256,8 @@ impl FspCotMessage {
         // As per OpenRM's `kfspPrepareBootCommands_GH100`.
         if fb_info.pmu_reserved_size != 0 {
             offset = (offset + u64::from(fb_info.pmu_reserved_size))
-                // The 2 MiB alignment is r570-specific.
+                // Open RM aligns this to WPR granularity, which is 128 KiB. 2 MiB is a
+                // multiple of that and reserves at least as much.
                 .align_up(Alignment::new::<SZ_2M>())
                 .ok_or(EINVAL)?;
         }

@@ -3,7 +3,6 @@
 
 pub(crate) mod commands;
 mod r000_00;
-mod r570_144;
 
 // Alias to avoid repeating the version number with every use.
 use r000_00 as bindings;
@@ -512,10 +511,9 @@ impl bindings::rpc_message_header_v {
     }
 }
 
-/// GSP Message Element (r000 MCTP/NVDM format).
+/// GSP Message Element, in the MCTP/NVDM format.
 ///
 /// This is the transport-layer header for messages exchanged with GSP-RM.
-/// r000 firmware uses MCTP/NVDM framing instead of the r570 `GSP_MSG_QUEUE_ELEMENT`.
 #[repr(C)]
 pub(crate) struct GspMsgElement {
     mctp_magic: u32,
