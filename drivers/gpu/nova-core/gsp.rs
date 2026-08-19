@@ -407,14 +407,6 @@ impl Gsp {
         })
     }
 
-    /// Query the GSP for the static GPU information.
-    ///
-    /// The r000 boot path gets the same information from the `GSP_INIT` reply instead.
-    #[expect(dead_code)]
-    pub(crate) fn get_static_info(&self, bar: Bar0<'_>) -> Result<commands::GetGspStaticInfoReply> {
-        self.cmdq.send_command(bar, commands::GetGspStaticInfo)
-    }
-
     /// Returns a shared handle to the GSP command queue.
     pub(crate) fn cmdq(&self) -> Arc<Cmdq> {
         self.cmdq.clone()
