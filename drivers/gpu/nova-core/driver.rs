@@ -135,7 +135,7 @@ impl pci::Driver for NovaCoreDriver {
                     // SAFETY: as for the `bar` borrow above.
                     let bar = unsafe { &*core::ptr::from_ref(bar) };
                     crate::irq::gsp::enable(bar, gpu.chipset(), vectors_ref.irq_type());
-                    gpu.cmdq().drain()?;
+                    gpu.cmdq().drain(bar)?;
                 },
                 _reg: auxiliary::Registration::new(
                     pdev.as_ref(),
