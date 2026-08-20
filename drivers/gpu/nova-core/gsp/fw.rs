@@ -535,23 +535,6 @@ impl GspMsgElement {
         self.element_header.element_len()
     }
 
-    /// Validates the queue element header and that the element is long enough to hold the RPC
-    /// header after it.
-    ///
-    /// # Errors
-    ///
-    /// - `EIO` if [`QueueElementHeader::validate`] fails, or if the declared element length is
-    ///   shorter than the two headers together.
-    pub(crate) fn validate_framing(&self) -> Result {
-        self.element_header.validate().map_err(|_| EIO)?;
-
-        if self.length() < size_of::<Self>() {
-            return Err(EIO);
-        }
-
-        Ok(())
-    }
-
     // Returns the sequence number of the message.
     pub(crate) fn sequence(&self) -> u32 {
         self.rpc.sequence
@@ -665,6 +648,15 @@ impl QueueElementHeader {
             .div_ceil(num::usize_into_u32::<GSP_PAGE_SIZE>())
     }
 
+    /// Returns the NVDM type.
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` if the field holds no known NVDM type.
+    pub(crate) fn nvdm_type(&self) -> Result<NvdmType> {
+        self.nvdm.nvdm_type()
+    }
+
     /// Validates the queue element header.
     ///
     /// Returns the first check that fails as a [`QueueElementHeaderError`].
@@ -691,10 +683,6 @@ impl QueueElementHeader {
         }
 
         Ok(())
-    }
-
-    pub(crate) fn is_nvdm_type(&self, nvdm_type: NvdmType) -> bool {
-        self.nvdm.validate(nvdm_type)
     }
 }
 

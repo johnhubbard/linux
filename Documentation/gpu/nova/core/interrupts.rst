@@ -562,17 +562,23 @@ GSP.
 Draining the GSP-to-CPU queue
 -----------------------------
 
-The queue carries command replies and unsolicited events, and a message's
-function code says which it is.
+The queue carries RPC messages and GMC messages. GMC is the GPU Management
+Controller, and its API is ABI-stable. Every element opens with the same queue
+element header, which holds the MCTP and NVDM headers, and the NVDM type in
+that header selects which kind of message header follows. An RPC message is a
+command reply or an unsolicited event, and the two differ in the function code.
 
 * A function code that matches the awaited reply: the message is decoded and
   returned to the caller that sent the command.
-* Anything else is an event. An OS error record and a robust-channel record
-  are logged at error level, and an unrecognized function code at warning
-  level. The other known events (GSP logs, libos prints, assertion records,
-  lifecycle notices) need no action and get no line of their own, because the
-  receive trace at debug level already records every message's arrival with
-  its sequence number, function code, and length.
+* Any other RPC message is an event. An OS error record and a robust-channel
+  record are logged at error level, and an unrecognized function code at
+  warning level. The other known events (GSP logs, LIBOS prints, assertion
+  records, lifecycle notices) need no action and get no line of their own,
+  because the receive trace at debug level already records every message's
+  arrival with its sequence number, function code, and length.
+* A GMC message carries a command id in place of a function code. Only the
+  ``GSP_INIT`` wait during boot claims GMC messages, so one that arrives
+  anywhere else is logged at warning level and dropped.
 
 A command's reply must carry the RPC sequence number that nova-core wrote into
 the command, as well as its function code. A message with the awaited function
@@ -585,10 +591,11 @@ The read pointer advances past every message, whether it matched, was an event,
 or matched but failed to decode, so a message is never left at the queue head
 for the next receive to parse again.
 
-Corrupt framing is the exception. An element that fails framing validation has
-no trustworthy length, so the read pointer cannot advance past it. Such a
-failure poisons the queue: nova-core logs it once, and every later receive
-fails with ``EIO`` until the device is reset.
+Corrupt framing is the exception. An element that fails framing validation, or
+that carries an NVDM type that the queue does not use, has no trustworthy
+length, so the read pointer cannot advance past it. Such a failure poisons the
+queue: nova-core logs it once, and every later receive fails with ``EIO`` until
+the device is reset.
 
 The polling path and the IRQ thread both read the queue under the command-queue
 mutex. Replies and events share one queue and one read pointer, so one lock is
