@@ -31,6 +31,7 @@ use crate::{
         FLCN_ERR_BINARY_NOT_STARTED, //
     },
     firmware::{
+        bindata::UcodesImage,
         gen_bootloader::{
             BootloaderDmemDescV2,
             GenericBootloader, //
@@ -41,6 +42,7 @@ use crate::{
         cmdq::Cmdq,
         commands,
         fw::{
+            GspArgumentsPadded,
             GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER,
             GMCAPI_CMD_EXEC_HS_BINARY, //
         }, //
@@ -153,7 +155,6 @@ impl LoadExecContext<'_, '_> {
     /// - `EINVAL` if `command_id` is not a load-and-execute command.
     ///
     /// Errors from the handlers and from [`Self::core_resume`] are propagated as-is.
-    #[expect(dead_code)]
     fn dispatch_gmc_boot_event(
         &self,
         command_id: u32,
@@ -347,6 +348,10 @@ impl<'gsp> super::Gsp<'gsp> {
     ///
     /// Returns, with the GSP running, the static configuration that GSP-RM reported and the
     /// unload bundle for [`Self::unload`].
+    ///
+    /// # Errors
+    ///
+    /// - `ENOENT` if the ucodes image is not installed.
     pub(crate) fn boot(
         self: Pin<&mut Self>,
         mut ctx: super::GspBootContext<'_, 'gsp>,
@@ -359,10 +364,12 @@ impl<'gsp> super::Gsp<'gsp> {
 
         let gsp_fw = KBox::pin_init(GspFirmware::new(dev, chipset), GFP_KERNEL)?;
 
-        self.cmdq
-            .send_command_no_wait(commands::SetSystemInfo::new(pdev, chipset))?;
-        self.cmdq
-            .send_command_no_wait(commands::SetRegistry::new(ctx.vgpu.state())?)?;
+        let generic_bootloader = hal.generic_bootloader(dev, chipset, gsp_falcon.imem_size())?;
+
+        // GSP-RM reads the ucodes image through the image's page table only while it starts up, so
+        // the image is freed when the boot sequence returns.
+        let ucodes = UcodesImage::new(dev, chipset)?;
+        GspArgumentsPadded::set_bindata(&self.rmargs, &ucodes);
 
         // Perform the chipset-specific boot sequence, and retrieve the unload bundle.
         let unload_bundle = hal.boot(&self, &mut ctx, &gsp_fw)?.or_else(|| {
@@ -393,12 +400,20 @@ impl<'gsp> super::Gsp<'gsp> {
 
         dev_dbg!(pdev, "RISC-V active? {}\n", gsp_falcon.is_riscv_active(),);
 
-        hal.post_boot(&self, ctx, &gsp_fw)?;
+        let init_payload = commands::build_gsp_init_payload(pdev, chipset, ctx.vgpu.state())?;
+        let load_exec = LoadExecContext {
+            bootloader: generic_bootloader.as_ref(),
+            gsp_falcon,
+            sec2_falcon: ctx.sec2_falcon,
+            dev,
+            bootloader_app_version: gsp_fw.bootloader.app_version,
+            libos_dma_handle: self.libos.dma_address(),
+        };
 
-        // Wait until GSP is fully initialized.
-        commands::wait_gsp_init_done(&self.cmdq)?;
-
-        let static_info = self.cmdq.send_command(commands::GetGspStaticInfo)?;
+        let static_info =
+            commands::gsp_init(&self.cmdq, &init_payload, |header, payload_0, payload_1| {
+                load_exec.dispatch_gmc_boot_event(header.gmc.command_id(), payload_0, payload_1)
+            })?;
 
         Ok(super::BootResult {
             unload_bundle: unload_guard.dismiss().1,
@@ -412,12 +427,16 @@ impl<'gsp> super::Gsp<'gsp> {
         gsp_falcon: &Falcon<'_, Gsp>,
         mode: commands::PowerStateLevel,
     ) -> Result {
-        // Command to shut the GSP down.
-        cmdq.send_command(commands::UnloadingGuestDriver::new(mode))?;
+        commands::gsp_suspend(cmdq, mode)?;
 
-        // Wait until GSP signals it is suspended.
+        // GSP-RM posts messages while it suspends, and the GSP event interrupt is already freed,
+        // so this poll drains them.
         read_poll_timeout(
-            || Ok(gsp_falcon.is_processor_suspended()),
+            || {
+                cmdq.drain()?;
+
+                Ok(gsp_falcon.is_processor_suspended())
+            },
             |suspended| *suspended,
             Delta::from_millis(10),
             Delta::from_secs(5),
