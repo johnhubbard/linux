@@ -920,6 +920,14 @@ impl CmdqInner {
             )));
         };
 
+        if header.validate_framing().is_err() {
+            return Err(self.poison(fmt!(
+                "message with sequence {} has bad MCTP framing, declared length {}",
+                header.sequence(),
+                header.length()
+            )));
+        }
+
         let payload_length = header.payload_length();
 
         // Check that the driver read area is large enough for the message.
@@ -943,13 +951,6 @@ impl CmdqInner {
                 slice_2.split_at(payload_length - slice_1.len()).0,
             )
         };
-
-        if !header.has_valid_magic() {
-            return Err(self.poison(fmt!(
-                "message with sequence {} has a bad MCTP magic",
-                header.sequence()
-            )));
-        }
 
         Ok(GspMessage {
             header,

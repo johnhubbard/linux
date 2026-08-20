@@ -550,9 +550,9 @@ impl GspMsgElement {
         self.transport.element_len()
     }
 
-    /// Returns `true` if the MCTP magic field contains the expected value.
-    pub(crate) fn has_valid_magic(&self) -> bool {
-        self.transport.has_valid_magic()
+    /// Validates the transport framing. See [`QueueElementHeader::validate`].
+    pub(crate) fn validate_framing(&self) -> Result {
+        self.transport.validate(size_of::<Self>())
     }
 
     // Returns the sequence number of the message.
@@ -652,11 +652,6 @@ impl QueueElementHeader {
     fn element_count(&self) -> u32 {
         self.element_len
             .div_ceil(num::usize_into_u32::<GSP_PAGE_SIZE>())
-    }
-
-    /// Returns `true` if the element opens with the MCTP magic.
-    fn has_valid_magic(&self) -> bool {
-        self.magic == MCTP_MAGIC
     }
 
     /// Returns `true` if the NVDM type is `nvdm_type`, which is what says which message header
