@@ -317,6 +317,11 @@ impl<'a> DmaGspMem<'a> {
         num::u32_as_usize(self.free_slots()) * GSP_PAGE_SIZE
     }
 
+    /// Returns `true` if the GSP has posted a message that the driver has not consumed.
+    fn has_unread_message(&self) -> bool {
+        self.gsp_write_ptr() != self.cpu_read_ptr
+    }
+
     /// Returns the region of the GSP message queue that the driver may read, as two slices
     /// because the ring wraps.
     fn driver_read_area(&self) -> (&[[u8; GSP_PAGE_SIZE]], &[[u8; GSP_PAGE_SIZE]]) {
@@ -462,9 +467,9 @@ struct GspCommand<'a, H> {
     contents: (&'a mut [u8], &'a mut [u8]),
 }
 
-/// A message ready to be processed from the message queue.
+/// An RPC message ready to be processed from the message queue.
 ///
-/// This is the type returned by [`CmdqInner::wait_for_msg`].
+/// This is the message that [`QueueElement::Rpc`] carries.
 struct GspMessage<'a> {
     // Reference to the header of the message.
     header: &'a GspMsgElement,
@@ -492,20 +497,47 @@ struct GmcMessage<'a> {
 ///
 /// This is the type returned by [`CmdqInner::wait_for_element`].
 enum QueueElement<'a> {
+    /// An RM RPC message.
+    Rpc(GspMessage<'a>),
     /// A GMC API message.
     Gmc(GmcMessage<'a>),
-    /// An element whose NVDM type names another kind of message, such as an RM RPC. Only its
-    /// queue element header is decoded.
-    Other(&'a QueueElementHeader),
 }
 
 impl QueueElement<'_> {
     /// Returns the number of queue slots that the element occupies.
     fn element_count(&self) -> u32 {
         match self {
+            Self::Rpc(message) => message.header.element_count(),
             Self::Gmc(message) => message.header.element_count(),
-            Self::Other(element_header) => element_header.element_count(),
         }
+    }
+}
+
+/// The headers that open a queue element of one kind of message: the queue element header, then
+/// the RPC header or the GMC API header.
+trait MessageHeaders: FromBytes {
+    /// Name of the kind of message, for the log line written when an element of this kind poisons
+    /// the queue.
+    const KIND: &'static str;
+
+    /// Returns the length of the payload that follows the message header, or `None` if the
+    /// message length in the queue element header is shorter than the message header.
+    fn payload_length(&self) -> Option<usize>;
+}
+
+impl MessageHeaders for GspMsgElement {
+    const KIND: &'static str = "RPC";
+
+    fn payload_length(&self) -> Option<usize> {
+        GspMsgElement::payload_length(self)
+    }
+}
+
+impl MessageHeaders for GspGmcMsgElement {
+    const KIND: &'static str = "GMC";
+
+    fn payload_length(&self) -> Option<usize> {
+        GspGmcMsgElement::payload_length(self)
     }
 }
 
@@ -668,16 +700,16 @@ impl<'cmdq> Cmdq<'cmdq> {
         self.inner.lock().await_msg(None)
     }
 
-    /// Logs and consumes every message the GSP has already posted, and returns without waiting for
-    /// more.
+    /// Logs and consumes every element that the GSP has already posted, and returns without waiting
+    /// for more.
     ///
-    /// No caller is waiting for a reply while this holds the queue mutex, so every message is
+    /// No caller is waiting for a reply while this holds the queue mutex, so every element is
     /// logged as an event. See "Draining the GSP-to-CPU queue" in
     /// `Documentation/gpu/nova/core/interrupts.rst`.
     ///
     /// # Errors
     ///
-    /// `EIO` if the queue is poisoned, or if a message fails framing validation.
+    /// `EIO` if the queue is poisoned, or if an element fails framing validation.
     pub(crate) fn drain(&self) -> Result {
         self.inner.lock().drain()
     }
@@ -690,11 +722,11 @@ struct CmdqInner<'a> {
     /// Next RPC sequence number, advanced once per command, however many messages the command is
     /// split into.
     rpc_seq: u32,
-    /// Set once a message fails framing validation. Every later receive fails, since
-    /// the bad message cannot be skipped. See "Draining the GSP-to-CPU queue" in
+    /// Set once an element fails framing validation. Every later receive fails, because the bad
+    /// element cannot be skipped. See "Draining the GSP-to-CPU queue" in
     /// `Documentation/gpu/nova/core/interrupts.rst`.
     ///
-    /// A [`Cell`] because [`Self::wait_for_msg`] sets it through `&self`.
+    /// A [`Cell`], because the receive path sets it through `&self`.
     poisoned: Cell<bool>,
     /// Memory area shared with the GSP for communicating commands and messages.
     gsp_mem: DmaGspMem<'a>,
@@ -800,7 +832,7 @@ impl CmdqInner<'_> {
 
     /// Logs `reason`, poisons the queue, and returns `EIO` for the caller to propagate.
     fn poison(&self, reason: fmt::Arguments<'_>) -> Error {
-        dev_err!(&self.dev, "GSP RPC: receive: queue poisoned: {}\n", reason);
+        dev_err!(&self.dev, "GSP receive: queue poisoned: {}\n", reason);
         self.poisoned.set(true);
 
         EIO
@@ -851,81 +883,17 @@ impl CmdqInner<'_> {
         Ok(())
     }
 
-    /// Waits for a message to become available on the message queue.
+    /// Receives an element from the GSP.
     ///
-    /// This validates the queue element header and the lengths that it carries, and does not
-    /// interpret the RPC header that follows it.
-    ///
-    /// Returns the message's [`GspMsgElement`] and its contents as two byte slices, the second of
-    /// which is empty unless the message wraps around the end of the message queue.
+    /// [`Self::match_rpc_reply`] decodes an RPC message as the awaited reply of type `M`, or logs
+    /// it. `expected_seq` narrows the match. A GMC message is logged as unclaimed.
     ///
     /// # Errors
     ///
-    /// - `ETIMEDOUT` if `timeout` has elapsed before any message becomes available.
-    /// - `EIO` if the queue is already poisoned, or if the framing is invalid, which poisons it
-    ///   (see [`Self::poisoned`]).
-    fn wait_for_msg(&self, timeout: Delta) -> Result<GspMessage<'_>> {
-        if self.poisoned.get() {
-            return Err(EIO);
-        }
-
-        // Wait for a message to arrive from the GSP.
-        let (slice_1, slice_2) = read_poll_timeout(
-            || Ok(self.gsp_mem.driver_read_area()),
-            |driver_area| !driver_area.0.is_empty(),
-            Delta::from_millis(1),
-            timeout,
-        )
-        .map(|(slice_1, slice_2)| (slice_1.as_flattened(), slice_2.as_flattened()))?;
-
-        // Extract the `GspMsgElement`.
-        let Some((header, slice_1)) = GspMsgElement::from_bytes_prefix(slice_1) else {
-            return Err(self.poison(fmt!(
-                "read area of {} bytes is shorter than a message header",
-                slice_1.len()
-            )));
-        };
-
-        if header.validate_framing().is_err() {
-            return Err(self.poison(fmt!(
-                "RPC element has a bad queue element header, element length {}",
-                header.length()
-            )));
-        }
-
-        dev_dbg!(
-            &self.dev,
-            "GSP RPC: receive: seq# {}, function={:?}, length=0x{:x}\n",
-            header.sequence(),
-            header.function(),
-            header.length(),
-        );
-
-        let Some(payload_length) = header.payload_length() else {
-            return Err(self.poison(fmt!(
-                "RPC message seq# {}: message length shorter than the RPC header",
-                header.sequence()
-            )));
-        };
-
-        let contents = self.payload_slices(slice_1, slice_2, payload_length)?;
-
-        Ok(GspMessage { header, contents })
-    }
-
-    /// Receives a message from the GSP.
-    ///
-    /// [`Self::match_rpc_reply`] decodes the message as the awaited reply of type `M`, or logs it.
-    /// `expected_seq` narrows the match.
-    ///
-    /// The read pointer advances past the message in every case, including a decode failure.
-    ///
-    /// # Errors
-    ///
-    /// - `ETIMEDOUT` if `timeout` has elapsed before any message becomes available.
-    /// - `EIO` if the queue is poisoned or the message fails framing validation (see
-    ///   [`Self::wait_for_msg`]), or if the matched message is too short for `M::Message`.
-    /// - `ENOMSG` if the message was not the awaited reply.
+    /// - `ETIMEDOUT` if `timeout` has elapsed before any element becomes available.
+    /// - `EIO` if the queue is poisoned or the element fails framing validation (see
+    ///   [`Self::wait_for_element`]), or if the matched message is too short for `M::Message`.
+    /// - `ENOMSG` if the element is not the awaited reply.
     ///
     /// Error codes returned by [`MessageFromGsp::read`] are propagated as-is.
     fn receive_msg<M: MessageFromGsp>(
@@ -937,17 +905,14 @@ impl CmdqInner<'_> {
         // This allows all error types, including `Infallible`, to be used for `M::InitError`.
         Error: From<M::InitError>,
     {
-        let message = self.wait_for_msg(timeout)?;
+        self.consume_element(timeout, |this, element| match element {
+            QueueElement::Gmc(message) => {
+                this.log_gmc_event(message.header);
 
-        // An early return here would leave the read pointer on this message.
-        let result = self.match_rpc_reply::<M>(&message, expected_seq);
-
-        // Advance the read pointer past this message.
-        self.gsp_mem.advance_cpu_read_ptr(u32::try_from(
-            message.header.length().div_ceil(GSP_PAGE_SIZE),
-        )?);
-
-        result
+                Err(ENOMSG)
+            }
+            QueueElement::Rpc(message) => this.match_rpc_reply::<M>(&message, expected_seq),
+        })
     }
 
     /// Decodes `message` as the awaited reply of type `M`, or logs it.
@@ -1020,15 +985,15 @@ impl CmdqInner<'_> {
 
     /// Receives a message of type `M`, waiting up to [`Cmdq::RECEIVE_TIMEOUT`] from the call.
     ///
-    /// Any other message that arrives first is logged as an event and does not extend the
-    /// deadline. `expected_seq` narrows the match as [`Self::match_rpc_reply`] describes.
+    /// Any other element that arrives first is logged and does not extend the deadline.
+    /// `expected_seq` narrows the match as [`Self::match_rpc_reply`] describes.
     ///
     /// # Errors
     ///
     /// - `ETIMEDOUT` if no message of type `M` arrives before the deadline, however many other
-    ///   messages arrive while waiting.
-    /// - `EIO` if the queue is poisoned or a message fails framing validation (see
-    ///   [`Self::wait_for_msg`]).
+    ///   elements arrive while waiting.
+    /// - `EIO` if the queue is poisoned or an element fails framing validation (see
+    ///   [`Self::wait_for_element`]).
     ///
     /// Error codes returned by [`MessageFromGsp::read`] are propagated as-is.
     fn await_msg<M: MessageFromGsp>(&mut self, expected_seq: Option<u32>) -> Result<M>
@@ -1050,11 +1015,11 @@ impl CmdqInner<'_> {
         }
     }
 
-    /// Logs an event, meaning a message that no caller was waiting for.
+    /// Logs an event, meaning an RPC message that no caller is waiting for.
     ///
     /// An OS error or robust-channel record is logged at error level and an unknown function code
     /// at warning level. Every other event is recorded only by the receive trace in
-    /// [`Self::wait_for_msg`].
+    /// [`Self::consume_element`].
     fn log_event(&self, function: Result<MsgFunction, u32>, seq: u32) {
         match function {
             Ok(MsgFunction::OsErrorLog) => {
@@ -1080,27 +1045,35 @@ impl CmdqInner<'_> {
         }
     }
 
-    /// Logs and consumes every message the queue holds.
+    /// Logs a GMC message that no caller is waiting for: a response to a request that has already
+    /// timed out, or an event that arrives outside the boot sequence.
+    fn log_gmc_event(&self, header: &GspGmcMsgElement) {
+        dev_warn!(
+            &self.dev,
+            "GSP GMC: dropping unclaimed message (seq {}, command_id=0x{:x})\n",
+            header.gmc.sequence,
+            header.gmc.command_id(),
+        );
+    }
+
+    /// Logs and consumes every element that the queue holds.
     ///
     /// # Errors
     ///
-    /// `EIO` if the queue is poisoned, a message fails framing validation, or a
-    /// message's page count overflows a `u32`.
+    /// `EIO` if the queue is poisoned or an element fails framing validation.
     fn drain(&mut self) -> Result {
-        while !self.gsp_mem.driver_read_area().0.is_empty() {
-            // A message is available, so this returns without waiting.
-            let msg = self.wait_for_msg(Delta::ZERO)?;
+        while self.gsp_mem.has_unread_message() {
+            // An element is available, so this returns without waiting.
+            self.consume_element(Delta::ZERO, |this, element| {
+                match element {
+                    QueueElement::Rpc(message) => {
+                        this.log_event(message.header.function(), message.header.sequence());
+                    }
+                    QueueElement::Gmc(message) => this.log_gmc_event(message.header),
+                }
 
-            let pages =
-                u32::try_from(msg.header.length().div_ceil(GSP_PAGE_SIZE)).map_err(|_| {
-                    dev_err!(&self.dev, "GSP drain: message length overflow\n");
-                    EIO
-                })?;
-            let function = msg.header.function();
-            let seq = msg.header.sequence();
-
-            self.gsp_mem.advance_cpu_read_ptr(pages);
-            self.log_event(function, seq);
+                Ok(())
+            })?;
         }
 
         Ok(())
@@ -1146,18 +1119,22 @@ impl CmdqInner<'_> {
     ///     | queue element header: magic, MCTP  |  validated
     ///     |   header, NVDM header, lengths     |
     ///     +------------------------------------+
-    ///     | message header                     |  decoded as a GMC API header when the NVDM type
-    ///     +------------------------------------+  is GmcApi, and left undecoded otherwise
+    ///     | message header                     |  decoded as the RPC header or the GMC API
+    ///     +------------------------------------+  header. The NVDM type selects between the two.
     ///     | payload                            |  truncated to the payload length computed
     ///     +------------------------------------+  from the queue element header
     /// ```
     ///
+    /// The element stays at the queue head, and the payload slices point into it, so the read
+    /// pointer must not advance until they are dropped.
+    ///
     /// # Errors
     ///
-    /// - `ETIMEDOUT` if no element arrives within `timeout`.
-    /// - `EIO` if the queue is already poisoned, or if the framing is invalid, or if the payload
-    ///   size in the GMC API header differs from the payload size in the queue element header.
-    ///   Each of these poisons the queue (see [`Self::poisoned`]).
+    /// - `ETIMEDOUT` if `timeout` has elapsed before any element becomes available.
+    /// - `EIO` if the queue is already poisoned, or if the framing, the NVDM type or a length in
+    ///   a header is invalid, or if the payload size in the GMC API header differs from the
+    ///   payload size in the queue element header. Each of these poisons the queue (see
+    ///   [`Self::poisoned`]).
     fn wait_for_element(&self, timeout: Delta) -> Result<QueueElement<'_>> {
         if self.poisoned.get() {
             return Err(EIO);
@@ -1186,38 +1163,68 @@ impl CmdqInner<'_> {
             )));
         }
 
-        if !element_header.is_nvdm_type(NvdmType::GmcApi) {
-            return Ok(QueueElement::Other(element_header));
-        }
+        match element_header.nvdm_type() {
+            Ok(NvdmType::RmRpc) => {
+                let (header, contents) = self.split_element::<GspMsgElement>(slice_1, slice_2)?;
 
-        let Some((header, slice_1)) = GspGmcMsgElement::from_bytes_prefix(slice_1) else {
+                Ok(QueueElement::Rpc(GspMessage { header, contents }))
+            }
+            Ok(NvdmType::GmcApi) => {
+                let (header, contents) =
+                    self.split_element::<GspGmcMsgElement>(slice_1, slice_2)?;
+
+                // GSP-RM writes both sizes from the same payload, so a difference means that one
+                // of the two headers is corrupt, and the driver cannot know which.
+                let payload_length = contents.0.len() + contents.1.len();
+                if payload_length != num::u32_as_usize(header.gmc.size) {
+                    return Err(self.poison(fmt!(
+                        "GMC seq# {}: payload bytes: GMC API header {}, queue element header {}",
+                        header.gmc.sequence,
+                        header.gmc.size,
+                        payload_length
+                    )));
+                }
+
+                Ok(QueueElement::Gmc(GmcMessage { header, contents }))
+            }
+            Ok(nvdm_type) => Err(self.poison(fmt!(
+                "element carries NVDM type {:?}, which the GSP queues do not use",
+                nvdm_type
+            ))),
+            Err(_) => Err(self.poison(fmt!("element carries an unknown NVDM type"))),
+        }
+    }
+
+    /// Splits the read area into the headers of type `H` that open the element and the payload
+    /// slices that follow them.
+    ///
+    /// # Errors
+    ///
+    /// - `EIO` if the read area is shorter than the headers, if the message length in the queue
+    ///   element header is shorter than the message header, or if fewer payload bytes are
+    ///   readable than the payload length. Each of these poisons the queue.
+    fn split_element<'a, H: MessageHeaders>(
+        &self,
+        slice_1: &'a [u8],
+        slice_2: &'a [u8],
+    ) -> Result<(&'a H, (&'a [u8], &'a [u8]))> {
+        let Some((header, slice_1)) = H::from_bytes_prefix(slice_1) else {
             return Err(self.poison(fmt!(
-                "read area of {} bytes is shorter than a GMC element header",
-                slice_1.len()
+                "{} element: read area is shorter than the message header",
+                H::KIND
             )));
         };
 
         let Some(payload_length) = header.payload_length() else {
             return Err(self.poison(fmt!(
-                "GMC message seq# {}: message length shorter than the GMC API header",
-                header.gmc.sequence
+                "{} element: message length shorter than the message header",
+                H::KIND
             )));
         };
 
-        // GSP-RM writes both sizes from the same payload, so a difference means that one of the
-        // two headers is corrupt, and the driver cannot know which.
-        if payload_length != num::u32_as_usize(header.gmc.size) {
-            return Err(self.poison(fmt!(
-                "GMC seq# {}: payload bytes: GMC API header {}, queue element header {}",
-                header.gmc.sequence,
-                header.gmc.size,
-                payload_length
-            )));
-        }
-
         let contents = self.payload_slices(slice_1, slice_2, payload_length)?;
 
-        Ok(QueueElement::Gmc(GmcMessage { header, contents }))
+        Ok((header, contents))
     }
 
     /// Waits for the next queue element, passes it to `f`, and advances the read pointer past it.
@@ -1240,6 +1247,23 @@ impl CmdqInner<'_> {
         let element = self.wait_for_element(timeout)?;
         let element_count = element.element_count();
 
+        match &element {
+            QueueElement::Rpc(message) => dev_dbg!(
+                &self.dev,
+                "GSP RPC: receive: seq# {}, function={:?}, length=0x{:x}\n",
+                message.header.sequence(),
+                message.header.function(),
+                message.header.length(),
+            ),
+            QueueElement::Gmc(message) => dev_dbg!(
+                &self.dev,
+                "GSP GMC: receive: seq# {}, command_id=0x{:x}, length=0x{:x}\n",
+                message.header.gmc.sequence,
+                message.header.gmc.command_id(),
+                message.header.length(),
+            ),
+        }
+
         let result = f(self, element);
 
         self.gsp_mem.advance_cpu_read_ptr(element_count);
@@ -1250,8 +1274,7 @@ impl CmdqInner<'_> {
     /// Receives the next queue element and, if it is a GMC element, passes it to `handler`.
     ///
     /// `handler` receives the headers that open the element and the payload that follows the GMC
-    /// API header, as two slices because the ring may wrap, and returns `None` for an element that
-    /// it declines.
+    /// API header, as two slices because the ring may wrap. An RPC element is logged as an event.
     ///
     /// Returns `Ok(None)` when `handler` declines the element or when the element is not a GMC
     /// element.
@@ -1259,7 +1282,7 @@ impl CmdqInner<'_> {
     /// # Errors
     ///
     /// - `ETIMEDOUT` if no element arrives within `timeout`.
-    /// - `EIO` if the queue is poisoned or the queue element header is invalid, as
+    /// - `EIO` if the queue is poisoned or the element is invalid, as
     ///   [`Self::wait_for_element`] describes.
     ///
     /// Errors from `handler` are propagated as-is.
@@ -1269,23 +1292,13 @@ impl CmdqInner<'_> {
         handler: impl FnOnce(&GspGmcMsgElement, &[u8], &[u8]) -> Result<Option<R>>,
     ) -> Result<Option<R>> {
         self.consume_element(timeout, |this, element| match element {
-            QueueElement::Other(_) => {
-                dev_warn!(&this.dev, "GSP GMC: dropping non-GMC queue element\n");
+            QueueElement::Rpc(message) => {
+                this.log_event(message.header.function(), message.header.sequence());
 
                 Ok(None)
             }
             QueueElement::Gmc(message) => {
-                let header = message.header;
-
-                dev_dbg!(
-                    &this.dev,
-                    "GSP GMC: event: seq# {}, command_id=0x{:x}, length=0x{:x}\n",
-                    header.gmc.sequence,
-                    header.gmc.command_id(),
-                    header.length(),
-                );
-
-                handler(header, message.contents.0, message.contents.1)
+                handler(message.header, message.contents.0, message.contents.1)
             }
         })
     }
@@ -1295,8 +1308,8 @@ impl CmdqInner<'_> {
     ///
     /// The response's payload is passed to `decode`, as two slices because the ring may wrap.
     /// Every other GMC element that arrives first is passed to `on_other` with the headers that
-    /// open it and its payload slices, and any other element is logged. Neither kind of element
-    /// extends the deadline.
+    /// open it and its payload slices, and an RPC element is logged as an event. Neither kind of
+    /// element extends the deadline.
     ///
     /// # Errors
     ///
