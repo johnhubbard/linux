@@ -30,7 +30,6 @@ mod fw;
 #[cfg_attr(not(CONFIG_KUNIT), allow(dead_code))]
 mod nvkv;
 mod regs;
-mod sequencer;
 
 pub(crate) use fw::{
     GspFmcBootParams,
@@ -343,8 +342,12 @@ impl Gsp {
             Ok(try_pin_init!(Self {
                 gsp_tlv,
                 cmdq <- Cmdq::new(dev),
-                rmargs: Coherent::init(dev, GFP_KERNEL, GspArgumentsPadded::new(&cmdq))?,
                 rm_state_monitor: Coherent::zeroed(dev, GFP_KERNEL)?,
+                rmargs: Coherent::init(
+                    dev,
+                    GFP_KERNEL,
+                    GspArgumentsPadded::new(&cmdq, None, rm_state_monitor),
+                )?,
                 libos: {
                     let mut libos = CoherentBox::zeroed_slice(
                         dev,
@@ -414,6 +417,7 @@ impl Gsp {
     }
 
     /// Query the GSP for the static GPU information.
+    #[expect(dead_code)]
     pub(crate) fn get_static_info(&self, bar: Bar0<'_>) -> Result<commands::GetGspStaticInfoReply> {
         self.cmdq.send_command(bar, commands::GetGspStaticInfo)
     }
@@ -421,3 +425,27 @@ impl Gsp {
 
 /// Opaque bundle required to unload the GSP. Created by [`Gsp::boot`], consumed by [`Gsp::unload`].
 pub(crate) struct UnloadBundle(KBox<dyn hal::UnloadBundle>);
+
+/// What a successful [`Gsp::boot`] leaves the caller.
+pub(crate) struct BootResult {
+    unload_bundle: Option<UnloadBundle>,
+    /// Static GPU configuration, as reported in the `GSP_INIT` reply.
+    pub(crate) static_info: commands::GetGspStaticInfoReply,
+}
+
+impl BootResult {
+    pub(super) fn new(
+        unload_bundle: Option<UnloadBundle>,
+        static_info: commands::GetGspStaticInfoReply,
+    ) -> Self {
+        Self {
+            unload_bundle,
+            static_info,
+        }
+    }
+
+    /// Takes the unload bundle out, leaving none behind, for the teardown path.
+    pub(crate) fn take_unload_bundle(&mut self) -> Option<UnloadBundle> {
+        self.unload_bundle.take()
+    }
+}

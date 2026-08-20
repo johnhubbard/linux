@@ -13,10 +13,7 @@ use kernel::{
     device,
     pci,
     prelude::*,
-    transmute::{
-        AsBytes,
-        FromBytes, //
-    }, //
+    transmute::AsBytes, //
 };
 
 use crate::{
@@ -27,7 +24,8 @@ use crate::{
             Cmdq,
             CommandToGsp,
             MessageFromGsp,
-            NoReply, //
+            NoReply,
+            QueuePointers, //
         },
         fw::{
             self,
@@ -38,7 +36,8 @@ use crate::{
                 RegKey, //
             },
             MsgFunction,
-            GMCAPI_CMD_GSP_INIT, //
+            GMCAPI_CMD_GSP_INIT,
+            GMCAPI_CMD_GSP_SUSPEND, //
         },
         nvkv::{
             Decoder,
@@ -52,11 +51,14 @@ use crate::{
 };
 
 /// The `GspSetSystemInfo` command.
+///
+/// The r000 boot path folds this into the `GSP_INIT` payload instead.
 pub(crate) struct SetSystemInfo<'a> {
     pdev: &'a pci::Device<device::Bound>,
     chipset: Chipset,
 }
 
+#[expect(dead_code)]
 impl<'a> SetSystemInfo<'a> {
     /// Creates a new `GspSetSystemInfo` command using the parameters of `pdev`.
     pub(crate) fn new(pdev: &'a pci::Device<device::Bound>, chipset: Chipset) -> Self {
@@ -82,10 +84,13 @@ struct RegistryEntry {
 }
 
 /// The `SetRegistry` command.
+///
+/// The r000 boot path folds this into the `GSP_INIT` payload instead.
 pub(crate) struct SetRegistry {
     entries: KVec<RegistryEntry>,
 }
 
+#[expect(dead_code)]
 impl SetRegistry {
     /// Creates a new `SetRegistry` command, using a set of hardcoded entries.
     pub(crate) fn new(vgpu_state: VgpuState) -> Result<Self> {
@@ -182,31 +187,6 @@ impl CommandToGsp for SetRegistry {
     }
 }
 
-/// Message type for GSP initialization done notification.
-struct GspInitDone;
-
-// SAFETY: `GspInitDone` is a zero-sized type with no bytes, therefore it
-// trivially has no uninitialized bytes.
-unsafe impl FromBytes for GspInitDone {}
-
-impl MessageFromGsp for GspInitDone {
-    const FUNCTION: MsgFunction = MsgFunction::GspInitDone;
-    type InitError = Infallible;
-    type Message = ();
-
-    fn read(
-        _msg: &Self::Message,
-        _sbuffer: &mut SBufferIter<array::IntoIter<&[u8], 2>>,
-    ) -> Result<Self, Self::InitError> {
-        Ok(GspInitDone)
-    }
-}
-
-/// Waits for GSP initialization to complete.
-pub(crate) fn wait_gsp_init_done(cmdq: &Cmdq) -> Result {
-    cmdq.await_msg::<GspInitDone>().map(|_| ())
-}
-
 /// The `GetGspStaticInfo` command.
 pub(crate) struct GetGspStaticInfo;
 
@@ -293,7 +273,6 @@ const REGISTRY_ENTRIES: &[(&[u8], u32)] = &[
 /// # Errors
 ///
 /// - `ENOMEM` if the registry list or the encoder buffer cannot be allocated.
-#[expect(dead_code)]
 pub(crate) fn build_gsp_init_payload(
     pdev: &pci::Device<device::Bound>,
     chipset: Chipset,
@@ -320,9 +299,9 @@ const GSP_INIT_MAX_RESPONSE_SIZE: u32 = 48 * 1024;
 /// Sends `GSP_INIT` and returns the static configuration its reply carries.
 ///
 /// GSP-RM raises load-and-execute events between the request and the reply, and it cannot finish
-/// starting until the driver has serviced them, so each one goes to `on_boot_event` rather than
-/// being skipped. GSP-RM sends the reply once it is up, so the reply doubles as the signal that
-/// boot is complete.
+/// starting until the driver has serviced them, so each one goes to `on_boot_event`, which
+/// reports back the [`QueuePointers`] state its handler left. GSP-RM sends the reply once it is
+/// up, so the reply doubles as the signal that boot is complete.
 ///
 /// `payload` is the blob from [`build_gsp_init_payload`].
 ///
@@ -334,12 +313,11 @@ const GSP_INIT_MAX_RESPONSE_SIZE: u32 = 48 * 1024;
 ///   [`Cmdq::RECEIVE_TIMEOUT`].
 ///
 /// Errors from `on_boot_event` and from decoding the reply are propagated as-is.
-#[expect(dead_code)]
 pub(crate) fn gsp_init(
     cmdq: &Cmdq,
     bar: Bar0<'_>,
     payload: &[u64],
-    mut on_boot_event: impl FnMut(u32, &[u8]) -> Result,
+    mut on_boot_event: impl FnMut(u32, &[u8]) -> Result<QueuePointers>,
 ) -> Result<GetGspStaticInfoReply> {
     // Qualified because `zerocopy::IntoBytes` also gives `[T]` an `as_bytes`.
     let payload = AsBytes::as_bytes(payload);
@@ -353,19 +331,25 @@ pub(crate) fn gsp_init(
 
     loop {
         let reply = cmdq.receive_gmc_and_dispatch(
+            bar,
             Cmdq::RECEIVE_TIMEOUT,
             |command_id, max_resp_or_status, payload_0, payload_1| {
                 if command_id == GMCAPI_CMD_GSP_INIT {
-                    Some(decode_gsp_init_reply(
-                        max_resp_or_status,
-                        payload_0,
-                        payload_1,
-                    ))
+                    (
+                        Some(decode_gsp_init_reply(
+                            max_resp_or_status,
+                            payload_0,
+                            payload_1,
+                        )),
+                        QueuePointers::Unchanged,
+                    )
                 } else {
                     // A boot event. Keep waiting for the reply unless handling it failed.
                     match on_boot_event(command_id, payload_0) {
-                        Ok(()) => None,
-                        Err(e) => Some(Err(e)),
+                        Ok(queue_pointers) => (None, queue_pointers),
+                        // A handler can fail after it has already reset the GSP, so the pointer
+                        // registers cannot be assumed intact on this path.
+                        Err(e) => (Some(Err(e)), QueuePointers::Reset),
                     }
                 }
             },
@@ -445,6 +429,23 @@ fn decode_gsp_info(words: &[u64]) -> Result<GetGspStaticInfoReply> {
 
 pub(crate) use fw::commands::PowerStateLevel;
 
+/// Tells GSP-RM to suspend.
+///
+/// GSP-RM sends no response to this command and reports the completed suspend through the GSP
+/// falcon's `MAILBOX0`, so the caller polls that register rather than waiting on the queue. The
+/// request carries no response buffer, hence a maximum response size of zero.
+///
+/// # Errors
+///
+/// - `EMSGSIZE` if the command exceeds the maximum queue element size.
+/// - `ETIMEDOUT` if space does not become available within the timeout.
+/// - `EIO` if the command header is not properly aligned.
+pub(crate) fn gsp_suspend(cmdq: &Cmdq, bar: Bar0<'_>, level: PowerStateLevel) -> Result {
+    let params = fw::commands::GspSuspend::new(level);
+
+    cmdq.send_gmc_no_wait(bar, GMCAPI_CMD_GSP_SUSPEND, AsBytes::as_bytes(&params), 0)
+}
+
 /// The `UnloadingGuestDriver` command, used to shut down the GSP.
 ///
 /// Only used within the `gsp` module.
@@ -452,6 +453,7 @@ pub(super) struct UnloadingGuestDriver {
     level: PowerStateLevel,
 }
 
+#[expect(dead_code)]
 impl UnloadingGuestDriver {
     /// Creates a new `UnloadingGuestDriver` command for the given [`PowerStateLevel`].
     pub(super) fn new(level: PowerStateLevel) -> Self {

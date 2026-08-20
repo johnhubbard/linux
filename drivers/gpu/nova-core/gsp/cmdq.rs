@@ -27,9 +27,7 @@ use kernel::{
         aref::ARef,
         barrier::{
             dma_mb,
-            Full,
-            Read,
-            Write, //
+            Full, //
         },
         Mutex, //
     },
@@ -58,8 +56,7 @@ use crate::{
             GspGmcMsgElement,
             GspMsgElement,
             MsgFunction,
-            MsgqRxHeader,
-            MsgqTxHeader,
+            MsgqTxHeaderV2,
             GSP_MSG_QUEUE_ELEMENT_SIZE_MAX, //
         },
         PteArray,
@@ -188,17 +185,14 @@ static_assert!(align_of::<MsgqData>() == GSP_PAGE_SIZE);
 ///
 /// Contains the data for a message queue, that either the driver or GSP writes to.
 ///
-/// Note that while the write pointer of `tx` corresponds to the `msgq` of the same instance, the
-/// read pointer of `rx` actually refers to the `Msgq` owned by the other side.
-/// This design ensures that only the driver or GSP ever writes to a given instance of this struct.
+/// Msgq v2 keeps the ring pointers in BAR0, so `tx` carries the queue geometry alone. `msgq` is
+/// aligned to [`GSP_PAGE_SIZE`], so the bytes between the two are zero padding.
 #[repr(C)]
 // There is no struct defined for this in the open-gpu-kernel-source headers.
 // Instead it is defined by code in `GspMsgQueuesInit()`.
 struct Msgq {
-    /// Header for sending messages, including the write pointer.
-    tx: MsgqTxHeader,
-    /// Header for receiving messages, including the read pointer.
-    rx: MsgqRxHeader,
+    /// Header describing the queue geometry.
+    tx: MsgqTxHeaderV2,
     /// The message queue proper.
     msgq: MsgqData,
 }
@@ -251,119 +245,16 @@ impl DmaGspMem {
     /// Allocate a new instance and map it for `dev`.
     fn new(dev: &device::Device<device::Bound>) -> Result<Self> {
         const MSGQ_SIZE: u32 = num::usize_into_u32::<{ size_of::<Msgq>() }>();
-        const RX_HDR_OFF: u32 = num::usize_into_u32::<{ mem::offset_of!(Msgq, rx) }>();
+        const MSG_SIZE: u32 = num::usize_into_u32::<GSP_PAGE_SIZE>();
+        const ENTRY_OFF: u32 = num::usize_into_u32::<{ mem::offset_of!(Msgq, msgq) }>();
 
         let mut gsp_mem = CoherentBox::<GspMem>::zeroed(dev, GFP_KERNEL)?;
-        gsp_mem.cpuq.tx = MsgqTxHeader::new(MSGQ_SIZE, RX_HDR_OFF, MSGQ_NUM_PAGES);
-        gsp_mem.cpuq.rx = MsgqRxHeader::new();
+        gsp_mem.cpuq.tx = MsgqTxHeaderV2::new(MSGQ_SIZE, MSG_SIZE, MSGQ_NUM_PAGES, ENTRY_OFF);
 
         let gsp_mem: Coherent<_> = gsp_mem.into();
         PteArray::init(io_project!(gsp_mem, .ptes), gsp_mem.dma_address())?;
 
         Ok(Self(gsp_mem))
-    }
-
-    /// Returns the region of the CPU message queue that the driver is currently allowed to write
-    /// to.
-    ///
-    /// As the message queue is a circular buffer, the region may be discontiguous in memory. In
-    /// that case the second slice will have a non-zero length.
-    fn driver_write_area(&mut self) -> (&mut [[u8; GSP_PAGE_SIZE]], &mut [[u8; GSP_PAGE_SIZE]]) {
-        let tx = self.cpu_write_ptr();
-        let rx = self.gsp_read_ptr();
-
-        // Pointer to the first entry of the CPU message queue.
-        let data = ptr::project!(mut self.0.as_mut_ptr(), .cpuq.msgq.data[build: 0]);
-
-        let (tail_end, wrap_end) = if rx == 0 {
-            // The write area is non-wrapping, and stops at the second-to-last entry of the command
-            // queue (to leave the last one empty).
-            (MSGQ_NUM_PAGES - 1, 0)
-        } else if rx <= tx {
-            // The write area wraps and continues until `rx - 1`.
-            (MSGQ_NUM_PAGES, rx - 1)
-        } else {
-            // The write area doesn't wrap and stops at `rx - 1`.
-            (rx - 1, 0)
-        };
-
-        // SAFETY:
-        // - `data` was created from a valid pointer, and `rx` and `tx` are in the
-        //   `0..MSGQ_NUM_PAGES` range per the invariants of `cpu_write_ptr` and `gsp_read_ptr`,
-        //   thus the created slices are valid.
-        // - The area starting at `tx` and ending at `rx - 2` modulo `MSGQ_NUM_PAGES`,
-        //   inclusive, belongs to the driver for writing and is not accessed concurrently by
-        //   the GSP.
-        // - The caller holds a reference to `self` for as long as the returned slices are live,
-        //   meaning the CPU write pointer cannot be advanced and thus that the returned area
-        //   remains exclusive to the CPU for the duration of the slices.
-        // - The created slices point to non-overlapping sub-ranges of `data` in all
-        //   branches (in the `rx <= tx` case, the second slice ends at `rx - 1` which is strictly
-        //   less than `tx` where the first slice starts; in the other cases the second slice is
-        //   empty), so creating two `&mut` references from them does not violate aliasing rules.
-        unsafe {
-            (
-                core::slice::from_raw_parts_mut(
-                    data.add(num::u32_as_usize(tx)),
-                    num::u32_as_usize(tail_end - tx),
-                ),
-                core::slice::from_raw_parts_mut(data, num::u32_as_usize(wrap_end)),
-            )
-        }
-    }
-
-    /// Returns the size of the region of the CPU message queue that the driver is currently allowed
-    /// to write to, in bytes.
-    fn driver_write_area_size(&self) -> usize {
-        let tx = self.cpu_write_ptr();
-        let rx = self.gsp_read_ptr();
-
-        // `rx` and `tx` are both in `0..MSGQ_NUM_PAGES` per the invariants of `gsp_read_ptr` and
-        // `cpu_write_ptr`. The minimum value case is where `rx == 0` and `tx == MSGQ_NUM_PAGES -
-        // 1`, which gives `0 + MSGQ_NUM_PAGES - (MSGQ_NUM_PAGES - 1) - 1 == 0`.
-        let slots = (rx + MSGQ_NUM_PAGES - tx - 1) % MSGQ_NUM_PAGES;
-        num::u32_as_usize(slots) * GSP_PAGE_SIZE
-    }
-
-    /// Returns the region of the GSP message queue that the driver is currently allowed to read
-    /// from.
-    ///
-    /// As the message queue is a circular buffer, the region may be discontiguous in memory. In
-    /// that case the second slice will have a non-zero length.
-    fn driver_read_area(&self) -> (&[[u8; GSP_PAGE_SIZE]], &[[u8; GSP_PAGE_SIZE]]) {
-        let tx = self.gsp_write_ptr();
-        let rx = self.cpu_read_ptr();
-
-        // Pointer to the first entry of the GSP message queue.
-        let data = ptr::project!(self.0.as_ptr(), .gspq.msgq.data[build: 0]);
-
-        let (tail_end, wrap_end) = if rx <= tx {
-            // Read area is non-wrapping and stops right before `tx`.
-            (tx, 0)
-        } else {
-            // Read area is wrapping and stops right before `tx`.
-            (MSGQ_NUM_PAGES, tx)
-        };
-
-        // SAFETY:
-        // - `data` was created from a valid pointer, and `rx` and `tx` are in the
-        //   `0..MSGQ_NUM_PAGES` range per the invariants of `gsp_write_ptr` and `cpu_read_ptr`,
-        //   thus the created slices are valid.
-        // - The area starting at `rx` and ending at `tx - 1` modulo `MSGQ_NUM_PAGES`,
-        //   inclusive, belongs to the driver for reading and is not accessed concurrently by
-        //   the GSP.
-        // - The caller holds a reference to `self` for as long as the returned slices are live,
-        //   meaning the CPU read pointer cannot be advanced and thus that the returned area
-        //   remains exclusive to the CPU for the duration of the slices.
-        unsafe {
-            (
-                core::slice::from_raw_parts(
-                    data.add(num::u32_as_usize(rx)),
-                    num::u32_as_usize(tail_end - rx),
-                ),
-                core::slice::from_raw_parts(data, num::u32_as_usize(wrap_end)),
-            )
-        }
     }
 
     /// Allocates a region on the command queue that is large enough to send a command of `size`
@@ -378,6 +269,7 @@ impl DmaGspMem {
     /// - `EIO` if the command header is not properly aligned.
     fn allocate_command<H: FromBytes + AsBytes>(
         &mut self,
+        bar: Bar0<'_>,
         size: usize,
         timeout: Delta,
     ) -> Result<GspCommand<'_, H>> {
@@ -385,7 +277,7 @@ impl DmaGspMem {
             return Err(EMSGSIZE);
         }
         read_poll_timeout(
-            || Ok(self.driver_write_area_size()),
+            || Ok(Self::driver_write_area_size_v2(bar)),
             |available_bytes| *available_bytes >= size_of::<H>() + size,
             Delta::from_micros(1),
             timeout,
@@ -393,7 +285,7 @@ impl DmaGspMem {
 
         // Get the current writable area as an array of bytes.
         let (slice_1, slice_2) = {
-            let (slice_1, slice_2) = self.driver_write_area();
+            let (slice_1, slice_2) = self.driver_write_area_v2(bar);
 
             (slice_1.as_flattened_mut(), slice_2.as_flattened_mut())
         };
@@ -416,72 +308,6 @@ impl DmaGspMem {
             contents: (slice_1, slice_2),
         })
     }
-
-    // Returns the index of the memory page the GSP will write the next message to.
-    //
-    // # Invariants
-    //
-    // - The returned value is within `0..MSGQ_NUM_PAGES`.
-    fn gsp_write_ptr(&self) -> u32 {
-        let ptr = MsgqTxHeader::write_ptr(io_project!(self.0, .gspq.tx)) % MSGQ_NUM_PAGES;
-
-        // ORDERING: LOAD->LOAD ordering needed to order `gsp_write_ptr` read before data read.
-        dma_mb(Read);
-
-        ptr
-    }
-
-    // Returns the index of the memory page the GSP will read the next command from.
-    //
-    // # Invariants
-    //
-    // - The returned value is within `0..MSGQ_NUM_PAGES`.
-    fn gsp_read_ptr(&self) -> u32 {
-        let ptr = MsgqRxHeader::read_ptr(io_project!(self.0, .gspq.rx)) % MSGQ_NUM_PAGES;
-
-        // ORDERING: LOAD->STORE ordering needed to order `gsp_read_ptr` read before data write.
-        dma_mb(Full);
-
-        ptr
-    }
-
-    // Returns the index of the memory page the CPU can read the next message from.
-    //
-    // # Invariants
-    //
-    // - The returned value is within `0..MSGQ_NUM_PAGES`.
-    fn cpu_read_ptr(&self) -> u32 {
-        MsgqRxHeader::read_ptr(io_project!(self.0, .cpuq.rx)) % MSGQ_NUM_PAGES
-    }
-
-    // Informs the GSP that it can send `elem_count` new pages into the message queue.
-    fn advance_cpu_read_ptr(&mut self, elem_count: u32) {
-        // ORDERING: LOAD->STORE ordering needed to order `cpu_read_ptr` write after data read.
-        dma_mb(Full);
-
-        let rx = io_project!(self.0, .cpuq.rx);
-        let rptr = MsgqRxHeader::read_ptr(rx).wrapping_add(elem_count) % MSGQ_NUM_PAGES;
-        MsgqRxHeader::set_read_ptr(rx, rptr)
-    }
-
-    // Returns the index of the memory page the CPU can write the next command to.
-    //
-    // # Invariants
-    //
-    // - The returned value is within `0..MSGQ_NUM_PAGES`.
-    fn cpu_write_ptr(&self) -> u32 {
-        MsgqTxHeader::write_ptr(io_project!(self.0, .cpuq.tx)) % MSGQ_NUM_PAGES
-    }
-
-    // Informs the GSP that it can process `elem_count` new pages from the command queue.
-    fn advance_cpu_write_ptr(&mut self, elem_count: u32) {
-        // ORDERING: STORE->STORE ordering needed to order `cpu_write_ptr` write after data write.
-        dma_mb(Write);
-
-        let tx = io_project!(self.0, .cpuq.tx);
-        let wptr = MsgqTxHeader::write_ptr(tx).wrapping_add(elem_count) % MSGQ_NUM_PAGES;
-        MsgqTxHeader::set_write_ptr(tx, wptr);
-    }
 }
 
 // Msgq v2 internals.
@@ -493,7 +319,6 @@ impl DmaGspMem {
 //
 // TODO: reset recovery across suspend and resume. A power cycle loses the driver's counters as
 // well, so both ends have to be re-established rather than restored.
-#[expect(dead_code)]
 impl DmaGspMem {
     // ORDERING: `readl` ends in `dma_rmb()`, which supplies the LOAD->LOAD ordering between this
     // read and the data read that follows it.
@@ -517,6 +342,20 @@ impl DmaGspMem {
 
     fn cpu_write_ptr_v2(bar: Bar0<'_>) -> u32 {
         *bar.read(regs::NV_PGSP_QUEUE_HEAD).address()
+    }
+
+    /// Writes back the two counters the driver owns, after a GSP reset has zeroed all four.
+    ///
+    /// GSP-RM restores `NV_PGSP_MSGQ_HEAD` and `NV_PGSP_QUEUE_TAIL` from its own state when it
+    /// resumes, and continues counting from where it left off rather than from zero. The driver
+    /// owns the other two and has to do the same, or the two ends address different slots.
+    fn restore_cpu_ptrs_v2(bar: Bar0<'_>, write_ptr: u32, read_ptr: u32) {
+        // ORDERING: LOAD->STORE ordering needed to order the read-pointer write after the data
+        // read, as in `advance_cpu_read_ptr_v2`.
+        dma_mb(Full);
+
+        bar.write_reg(regs::NV_PGSP_MSGQ_TAIL::zeroed().with_address(read_ptr));
+        bar.write_reg(regs::NV_PGSP_QUEUE_HEAD::zeroed().with_address(write_ptr));
     }
 
     fn advance_cpu_read_ptr_v2(bar: Bar0<'_>, count: u32) {
@@ -655,6 +494,19 @@ struct GmcMessage<'a> {
     contents: (&'a [u8], &'a [u8]),
 }
 
+/// State of the msgq v2 pointer registers after a GMC dispatch handler has run.
+///
+/// A handler that resets the GSP falcon zeroes all four registers, so a read-modify-write on
+/// them afterwards would restart the driver's side of the ring at zero.
+/// [`CmdqInner::receive_gmc_and_dispatch`] writes the captured values back instead.
+#[derive(PartialEq, Eq)]
+pub(crate) enum QueuePointers {
+    /// The handler left the pointer registers alone.
+    Unchanged,
+    /// The handler reset the GSP, which zeroed the pointer registers.
+    Reset,
+}
+
 /// GSP command queue.
 ///
 /// Provides the ability to send commands and receive messages from the GSP using a shared memory
@@ -707,24 +559,6 @@ impl Cmdq {
         })
     }
 
-    /// Computes the checksum for the message pointed to by `it`.
-    ///
-    /// A message is made of several parts, so `it` is an iterator over byte slices representing
-    /// these parts.
-    fn calculate_checksum<T: Iterator<Item = u8>>(it: T) -> u32 {
-        let sum64 = it
-            .enumerate()
-            .map(|(idx, byte)| (((idx % 8) * 8) as u32, byte))
-            .fold(0, |acc, (rol, byte)| acc ^ u64::from(byte).rotate_left(rol));
-
-        ((sum64 >> 32) as u32) ^ (sum64 as u32)
-    }
-
-    /// Notifies the GSP that we have updated the command queue pointers.
-    fn notify_gsp(bar: Bar0<'_>) {
-        bar.write_reg(regs::NV_PGSP_QUEUE_HEAD::zeroed().with_address(0u32));
-    }
-
     /// Sends `command` to the GSP and waits for the reply.
     ///
     /// An event that arrives before the reply is consumed, and logged when it reports an error.
@@ -751,7 +585,7 @@ impl Cmdq {
         let mut inner = self.inner.lock();
         inner.send_command(bar, command)?;
 
-        inner.await_msg()
+        inner.await_msg(bar)
     }
 
     /// Sends `command` to the GSP without waiting for a reply.
@@ -763,6 +597,7 @@ impl Cmdq {
     ///   written to by its [`CommandToGsp::init_variable_payload`] method.
     ///
     /// Error codes returned by the command initializers are propagated as-is.
+    #[expect(dead_code)]
     pub(crate) fn send_command_no_wait<M>(&self, bar: Bar0<'_>, command: M) -> Result
     where
         M: CommandToGsp<Reply = NoReply>,
@@ -780,10 +615,13 @@ impl Cmdq {
     /// See [`CmdqInner::receive_gmc_and_dispatch`] for return values, queue state, and errors.
     pub(crate) fn receive_gmc_and_dispatch<R>(
         &self,
+        bar: Bar0<'_>,
         timeout: Delta,
-        handler: impl FnOnce(u32, u32, &[u8], &[u8]) -> Option<R>,
+        handler: impl FnOnce(u32, u32, &[u8], &[u8]) -> (Option<R>, QueuePointers),
     ) -> Result<Option<R>> {
-        self.inner.lock().receive_gmc_and_dispatch(timeout, handler)
+        self.inner
+            .lock()
+            .receive_gmc_and_dispatch(bar, timeout, handler)
     }
 
     /// Sends a GMC API command to the GSP without waiting for its response.
@@ -818,15 +656,16 @@ impl Cmdq {
     ///
     /// - `ETIMEDOUT` if the event does not arrive within [`Self::RECEIVE_TIMEOUT`] of the call,
     ///   however many other events arrive while waiting.
-    /// - `EIO` if the queue is poisoned, or if a message fails framing or checksum validation.
+    /// - `EIO` if the queue is poisoned, or if a message fails framing or MCTP magic validation.
     ///
     /// Error codes returned by [`MessageFromGsp::read`] are propagated as-is.
-    pub(crate) fn await_msg<M: MessageFromGsp>(&self) -> Result<M>
+    #[expect(dead_code)]
+    pub(crate) fn await_msg<M: MessageFromGsp>(&self, bar: Bar0<'_>) -> Result<M>
     where
         // This allows all error types, including `Infallible`, to be used for `M::InitError`.
         Error: From<M::InitError>,
     {
-        self.inner.lock().await_msg()
+        self.inner.lock().await_msg(bar)
     }
 
     /// Drains every message currently pending in the GSP-to-CPU queue.
@@ -837,8 +676,8 @@ impl Cmdq {
     /// # Errors
     ///
     /// Propagates a receive error, in particular the `EIO` of a queue poisoned by corrupt framing.
-    pub(crate) fn drain(&self) -> Result {
-        self.inner.lock().drain()
+    pub(crate) fn drain(&self, bar: Bar0<'_>) -> Result {
+        self.inner.lock().drain(bar)
     }
 }
 
@@ -853,8 +692,8 @@ struct CmdqInner {
     /// Numbers GSP-initiated events in the debug log. The GSP leaves the RPC sequence unset on
     /// those messages, so the driver numbers them itself.
     rx_event_seq: u32,
-    /// Set once a message fails framing or checksum validation. Such a message has no trustworthy
-    /// length, so the queue cannot advance past it and every later receive fails.
+    /// Set once a message fails framing or MCTP magic validation. Such a message has no
+    /// trustworthy length, so the queue cannot advance past it and every later receive fails.
     ///
     /// A [`Cell`], so [`Self::wait_for_msg`] can set it through a shared borrow.
     poisoned: Cell<bool>,
@@ -885,7 +724,7 @@ impl CmdqInner {
         let size_in_bytes = command.size();
         let dst = self
             .gsp_mem
-            .allocate_command(size_in_bytes, Self::ALLOCATE_TIMEOUT)?;
+            .allocate_command(bar, size_in_bytes, Self::ALLOCATE_TIMEOUT)?;
 
         // Extract area for the command itself. The GSP message header and the command header
         // together are guaranteed to fit entirely into a single page, so it's ok to only look
@@ -893,7 +732,7 @@ impl CmdqInner {
         let (cmd, payload_1) = M::Command::from_bytes_mut_prefix(dst.contents.0).ok_or(EIO)?;
 
         // Fill the header and command in-place.
-        let msg_element = GspMsgElement::init(self.seq, size_in_bytes, M::FUNCTION);
+        let msg_element = GspMsgElement::init(size_in_bytes, M::FUNCTION);
         // SAFETY: `msg_header` and `cmd` are valid references, and not touched if the initializer
         // fails.
         unsafe {
@@ -909,14 +748,6 @@ impl CmdqInner {
             return Err(EIO);
         }
         drop(sbuffer);
-
-        // Compute checksum now that the whole message is ready.
-        dst.header
-            .set_checksum(Cmdq::calculate_checksum(SBufferIter::new_reader([
-                dst.header.as_bytes(),
-                dst.contents.0,
-                dst.contents.1,
-            ])));
 
         if M::IS_ASYNC {
             dev_dbg!(
@@ -940,8 +771,7 @@ impl CmdqInner {
         // All set - update the write pointer and inform the GSP of the new command.
         let elem_count = dst.header.element_count();
         self.seq += 1;
-        self.gsp_mem.advance_cpu_write_ptr(elem_count);
-        Cmdq::notify_gsp(bar);
+        DmaGspMem::advance_cpu_write_ptr_v2(bar, elem_count);
 
         Ok(())
     }
@@ -1010,9 +840,11 @@ impl CmdqInner {
         let seq = self.seq;
         self.seq = self.seq.wrapping_add(1);
 
-        let dst = self
-            .gsp_mem
-            .allocate_command::<GspGmcMsgElement>(payload.len(), Self::ALLOCATE_TIMEOUT)?;
+        let dst = self.gsp_mem.allocate_command::<GspGmcMsgElement>(
+            bar,
+            payload.len(),
+            Self::ALLOCATE_TIMEOUT,
+        )?;
 
         let msg_element =
             GspGmcMsgElement::init(command_id, u64::from(seq), payload.len(), max_response_size);
@@ -1033,8 +865,7 @@ impl CmdqInner {
         );
 
         let elem_count = dst.header.element_count();
-        self.gsp_mem.advance_cpu_write_ptr(elem_count);
-        Cmdq::notify_gsp(bar);
+        DmaGspMem::advance_cpu_write_ptr_v2(bar, elem_count);
 
         Ok(())
     }
@@ -1053,16 +884,16 @@ impl CmdqInner {
     /// # Errors
     ///
     /// - `ETIMEDOUT` if `timeout` has elapsed before any message becomes available.
-    /// - `EIO` if the framing or the checksum is invalid, or the queue was already poisoned by an
-    ///   earlier such failure. Both poison the queue, so every later receive on it fails too.
-    fn wait_for_msg(&self, timeout: Delta) -> Result<GspMessage<'_>> {
+    /// - `EIO` if the framing or the MCTP magic is invalid, or the queue was already poisoned by
+    ///   an earlier such failure. Both poison the queue, so every later receive on it fails too.
+    fn wait_for_msg(&self, bar: Bar0<'_>, timeout: Delta) -> Result<GspMessage<'_>> {
         if self.poisoned.get() {
             return Err(EIO);
         }
 
         // Wait for a message to arrive from the GSP.
         let (slice_1, slice_2) = read_poll_timeout(
-            || Ok(self.gsp_mem.driver_read_area()),
+            || Ok(self.gsp_mem.driver_read_area_v2(bar)),
             |driver_area| !driver_area.0.is_empty(),
             Delta::from_millis(1),
             timeout,
@@ -1101,15 +932,9 @@ impl CmdqInner {
             )
         };
 
-        // Validate checksum.
-        if Cmdq::calculate_checksum(SBufferIter::new_reader([
-            header.as_bytes(),
-            slice_1,
-            slice_2,
-        ])) != 0
-        {
+        if !header.has_valid_magic() {
             return Err(self.poison(fmt!(
-                "message with sequence {} has a bad checksum",
+                "message with sequence {} has a bad MCTP magic",
                 header.sequence()
             )));
         }
@@ -1166,17 +991,17 @@ impl CmdqInner {
     /// # Errors
     ///
     /// - `ETIMEDOUT` if `timeout` has elapsed before any message becomes available.
-    /// - `EIO` if the queue is poisoned or the message fails framing or checksum validation (see
-    ///   [`Self::wait_for_msg`]), or if the matched message is too short for `M::Message`.
+    /// - `EIO` if the queue is poisoned or the message fails framing or MCTP magic validation
+    ///   (see [`Self::wait_for_msg`]), or if the matched message is too short for `M::Message`.
     /// - `ENOMSG` if the message was not the awaited reply.
     ///
     /// Error codes returned by [`MessageFromGsp::read`] are propagated as-is.
-    fn receive_msg<M: MessageFromGsp>(&mut self, timeout: Delta) -> Result<M>
+    fn receive_msg<M: MessageFromGsp>(&mut self, bar: Bar0<'_>, timeout: Delta) -> Result<M>
     where
         // This allows all error types, including `Infallible`, to be used for `M::InitError`.
         Error: From<M::InitError>,
     {
-        let message = self.wait_for_msg(timeout)?;
+        let message = self.wait_for_msg(bar, timeout)?;
         let function = message.header.function();
         let seq = message.header.sequence();
         let length = message.header.length();
@@ -1213,8 +1038,7 @@ impl CmdqInner {
         };
 
         // Advance the read pointer past this message.
-        self.gsp_mem
-            .advance_cpu_read_ptr(u32::try_from(length.div_ceil(GSP_PAGE_SIZE))?);
+        DmaGspMem::advance_cpu_read_ptr_v2(bar, u32::try_from(length.div_ceil(GSP_PAGE_SIZE))?);
 
         self.advance_rx_event_seq(function);
 
@@ -1230,11 +1054,11 @@ impl CmdqInner {
     ///
     /// - `ETIMEDOUT` if no message of type `M` arrives before the deadline, however many other
     ///   messages arrive while waiting.
-    /// - `EIO` if the queue is poisoned or a message fails framing or checksum validation (see
+    /// - `EIO` if the queue is poisoned or a message fails framing or MCTP magic validation (see
     ///   [`Self::wait_for_msg`]).
     ///
     /// Error codes returned by [`MessageFromGsp::read`] are propagated as-is.
-    fn await_msg<M: MessageFromGsp>(&mut self) -> Result<M>
+    fn await_msg<M: MessageFromGsp>(&mut self, bar: Bar0<'_>) -> Result<M>
     where
         // This allows all error types, including `Infallible`, to be used for `M::InitError`.
         Error: From<M::InitError>,
@@ -1245,7 +1069,7 @@ impl CmdqInner {
             if remaining.is_negative() {
                 break Err(ETIMEDOUT);
             }
-            match self.receive_msg::<M>(remaining) {
+            match self.receive_msg::<M>(bar, remaining) {
                 Ok(msg) => break Ok(msg),
                 Err(ENOMSG) => continue,
                 Err(e) => break Err(e),
@@ -1293,10 +1117,10 @@ impl CmdqInner {
     ///
     /// Returns the receive error that stopped the drain, in particular the `EIO` of a queue
     /// poisoned by corrupt framing (see [`Self::wait_for_msg`]).
-    fn drain(&mut self) -> Result {
-        while !self.gsp_mem.driver_read_area().0.is_empty() {
+    fn drain(&mut self, bar: Bar0<'_>) -> Result {
+        while !self.gsp_mem.driver_read_area_v2(bar).0.is_empty() {
             // A message is available, so this returns without waiting.
-            let msg = self.wait_for_msg(Delta::ZERO)?;
+            let msg = self.wait_for_msg(bar, Delta::ZERO)?;
             let function = msg.header.function();
             let seq = msg.header.sequence();
             let length = msg.header.length();
@@ -1308,7 +1132,7 @@ impl CmdqInner {
                 EIO
             })?;
 
-            self.gsp_mem.advance_cpu_read_ptr(pages);
+            DmaGspMem::advance_cpu_read_ptr_v2(bar, pages);
             self.advance_rx_event_seq(function);
             self.log_event(function, seq);
         }
@@ -1330,13 +1154,13 @@ impl CmdqInner {
     /// - `ETIMEDOUT` if `timeout` has elapsed before any message becomes available.
     /// - `EIO` if the framing is invalid, or the queue was already poisoned by an earlier such
     ///   failure. Either failure poisons the queue, so recovery requires a reset.
-    fn wait_for_gmc_msg(&self, timeout: Delta) -> Result<GmcMessage<'_>> {
+    fn wait_for_gmc_msg(&self, bar: Bar0<'_>, timeout: Delta) -> Result<GmcMessage<'_>> {
         if self.poisoned.get() {
             return Err(EIO);
         }
 
         let (slice_1, slice_2) = read_poll_timeout(
-            || Ok(self.gsp_mem.driver_read_area()),
+            || Ok(self.gsp_mem.driver_read_area_v2(bar)),
             |driver_area| !driver_area.0.is_empty(),
             Delta::from_millis(1),
             timeout,
@@ -1390,10 +1214,12 @@ impl CmdqInner {
     /// The handler receives the GMC command id, the raw payload slices that follow the
     /// [`super::fw::GmcApiHeader`] (two because the ring may wrap), and that header's
     /// `max_resp_or_status` field, which only a handler that knows what it asked for can read.
-    /// It returns `None` for an element it does not handle.
+    /// It returns `None` for an element it does not handle, paired with the [`QueuePointers`]
+    /// state it left behind.
     ///
     /// Returns `Ok(None)` when nothing claimed the element, either because it is not a GMC
-    /// element or because the handler declined it. The read pointer is advanced on every path.
+    /// element or because the handler declined it. Either way the element is consumed: the read
+    /// pointer moves past it, or is written back past it when the handler reset the GSP.
     ///
     /// # Errors
     ///
@@ -1402,16 +1228,22 @@ impl CmdqInner {
     ///   [`Self::wait_for_gmc_msg`]).
     fn receive_gmc_and_dispatch<R>(
         &mut self,
+        bar: Bar0<'_>,
         timeout: Delta,
-        handler: impl FnOnce(u32, u32, &[u8], &[u8]) -> Option<R>,
+        handler: impl FnOnce(u32, u32, &[u8], &[u8]) -> (Option<R>, QueuePointers),
     ) -> Result<Option<R>> {
-        let message = self.wait_for_gmc_msg(timeout)?;
+        let message = self.wait_for_gmc_msg(bar, timeout)?;
         let header = message.header;
         let length = header.length();
 
-        let result = if !header.is_gmc_api() {
+        // A handler that resets the GSP zeroes both of these, and the values they hold now are
+        // the ones the driver has to put back.
+        let cpu_write_ptr = DmaGspMem::cpu_write_ptr_v2(bar);
+        let cpu_read_ptr = DmaGspMem::cpu_read_ptr_v2(bar);
+
+        let (result, queue_pointers) = if !header.is_gmc_api() {
             dev_warn!(&self.dev, "GSP GMC: dropping non-GMC queue element\n");
-            None
+            (None, QueuePointers::Unchanged)
         } else if num::u32_as_usize(header.gmc.size) != header.payload_length() {
             // GSP-RM sends the element as the GMC header plus `size` bytes, so the two lengths
             // describe the same payload and a handler cannot tell which one to believe.
@@ -1421,7 +1253,7 @@ impl CmdqInner {
                 header.gmc.size,
                 header.payload_length(),
             );
-            None
+            (None, QueuePointers::Unchanged)
         } else {
             let command_id = header.gmc.command_id();
 
@@ -1441,8 +1273,17 @@ impl CmdqInner {
             )
         };
 
-        self.gsp_mem
-            .advance_cpu_read_ptr(u32::try_from(length.div_ceil(GSP_PAGE_SIZE))?);
+        let pages = u32::try_from(length.div_ceil(GSP_PAGE_SIZE))?;
+
+        match queue_pointers {
+            QueuePointers::Unchanged => DmaGspMem::advance_cpu_read_ptr_v2(bar, pages),
+            // The registers read zero now, so a read-modify-write would restart the driver's
+            // side of the ring at zero while GSP-RM carries on from where it stopped. Put the
+            // captured values back instead, with this element counted as consumed.
+            QueuePointers::Reset => {
+                DmaGspMem::restore_cpu_ptrs_v2(bar, cpu_write_ptr, cpu_read_ptr.wrapping_add(pages))
+            }
+        }
 
         Ok(result)
     }

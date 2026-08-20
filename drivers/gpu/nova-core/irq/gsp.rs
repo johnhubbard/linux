@@ -165,7 +165,7 @@ impl irq::ThreadedHandler for GspInterrupt<'_> {
 
     /// IRQ thread: drains the GSP-to-CPU message queue.
     fn handle_threaded(&self) -> irq::IrqReturn {
-        if let Err(e) = self.cmdq.drain() {
+        if let Err(e) = self.cmdq.drain(self.bar) {
             // A failed drain repeats on every later notification, so stop delivering them.
             self.tree.disable_leaf(
                 GSP_INTR_0_VECTOR.leaf_index(),

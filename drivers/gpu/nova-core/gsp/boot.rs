@@ -29,20 +29,28 @@ use crate::{
         FalconModSelAlgo, //
     },
     firmware::{
+        bindata::request_ucodes_firmware,
         gen_bootloader::{
             BootloaderDmemDescV2,
             GenericBootloader, //
         },
         gsp::GspFirmware,
+        radix3::Radix3, //
     },
     gsp::{
-        cmdq::Cmdq,
+        cmdq::{
+            Cmdq,
+            QueuePointers, //
+        },
         commands,
         fw::{
+            BindataArgs,
+            GspArgumentsPadded,
             GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER,
             GMCAPI_CMD_EXEC_HS_BINARY, //
         }, //
     },
+    num,
     regs, //
 };
 
@@ -53,12 +61,17 @@ impl super::Gsp {
     /// user-space, patching them with signatures, and building firmware-specific intricate data
     /// structures that the GSP will use at runtime.
     ///
-    /// Upon return, the GSP is up and running, and its unload bundle (to be given as argument to
-    /// [`Self::unload`]) returned.
+    /// Upon return, the GSP is up and running, and the static configuration it reported plus its
+    /// unload bundle (to be given as argument to [`Self::unload`]) are returned.
+    ///
+    /// # Errors
+    ///
+    /// - `ENOENT` if the ucodes firmware image is absent. GSP-RM requires it on every chipset
+    ///   this driver supports.
     pub(crate) fn boot(
         self: Pin<&mut Self>,
         mut ctx: super::GspBootContext<'_, '_>,
-    ) -> Result<Option<super::UnloadBundle>> {
+    ) -> Result<super::BootResult> {
         let pdev = ctx.pdev;
         let bar = ctx.bar;
         let chipset = ctx.chipset;
@@ -68,10 +81,18 @@ impl super::Gsp {
 
         let gsp_fw = KBox::pin_init(GspFirmware::new(dev, chipset, &self.gsp_tlv), GFP_KERNEL)?;
 
-        self.cmdq
-            .send_command_no_wait(bar, commands::SetSystemInfo::new(pdev, chipset))?;
-        self.cmdq
-            .send_command_no_wait(bar, commands::SetRegistry::new(ctx.vgpu.state())?)?;
+        // GSP-RM reads the ucodes image through a radix3 page table, so the mapping has to
+        // outlive initialization.
+        let ucodes = request_ucodes_firmware(dev, chipset)?.ok_or(ENOENT)?;
+        let ucodes_size = ucodes.len();
+        let ucodes_radix3 = KBox::pin_init(Radix3::new(dev, ucodes), GFP_KERNEL)?;
+        GspArgumentsPadded::set_bindata(
+            &self.rmargs,
+            Some(&BindataArgs {
+                radix3: ucodes_radix3.dma_address(),
+                size: num::usize_as_u64(ucodes_size),
+            }),
+        );
 
         // Perform the chipset-specific boot sequence, and retrieve the unload bundle.
         let unload_bundle = hal.boot(&self, &mut ctx, &gsp_fw)?.or_else(|| {
@@ -102,12 +123,37 @@ impl super::Gsp {
 
         dev_dbg!(pdev, "RISC-V active? {}\n", gsp_falcon.is_riscv_active(),);
 
-        hal.post_boot(&self, ctx, &gsp_fw)?;
+        // GSP-RM discards any RPC that reaches it before GSP_INIT, so the system information
+        // and the registry keys go inside that one request.
+        let init_payload = commands::build_gsp_init_payload(pdev, chipset, ctx.vgpu.state())?;
+        let bootloader = if super::hal::uses_generic_bootloader(chipset) {
+            Some(GenericBootloader::new(dev, chipset, gsp_falcon)?)
+        } else {
+            None
+        };
+        let bootloader_app_version = gsp_fw.bootloader.app_version;
+        let libos_dma_handle = self.libos.dma_address();
+        let sec2_falcon = ctx.sec2_falcon;
 
-        // Wait until GSP is fully initialized.
-        commands::wait_gsp_init_done(&self.cmdq)?;
+        let static_info =
+            commands::gsp_init(&self.cmdq, bar, &init_payload, |command_id, payload| {
+                Self::dispatch_gmc_boot_event(
+                    command_id,
+                    payload,
+                    bootloader.as_ref(),
+                    gsp_falcon,
+                    sec2_falcon,
+                    bar,
+                    dev,
+                    bootloader_app_version,
+                    libos_dma_handle,
+                )
+            })?;
 
-        Ok(unload_guard.dismiss().1)
+        Ok(super::BootResult::new(
+            unload_guard.dismiss().1,
+            static_info,
+        ))
     }
 
     /// Restart GSP-RM once a load-and-execute image has run to completion.
@@ -115,6 +161,8 @@ impl super::Gsp {
     /// Resets the GSP falcon into RISC-V, hands it the libos boot arguments address through its
     /// mailboxes, and starts SEC2, which is what brings GSP-RM back up. Open RM calls this
     /// `kgspExecuteCoreResume`.
+    ///
+    /// The falcon reset zeroes the four msgq v2 pointer registers.
     ///
     /// # Errors
     ///
@@ -169,38 +217,49 @@ impl super::Gsp {
 
     /// Dispatch one GMC boot event to its load-and-execute handler.
     ///
-    /// A given GPU raises only one of the two commands, so only one of the handlers ever runs
-    /// on it.
+    /// A GPU raises one of the two commands and not the other, per
+    /// [`super::hal::uses_generic_bootloader`], so only one of the handlers ever runs on it.
+    /// Both restart GSP-RM, so a successful dispatch returns [`QueuePointers::Reset`].
     ///
     /// # Errors
     ///
-    /// - `EINVAL` if `command_id` is not a load-and-execute command.
+    /// - `EINVAL` if `command_id` is not a load-and-execute command, or if the GSP asks for the
+    ///   generic bootloader on a chipset that boots without one.
     ///
     /// Errors from the handlers are propagated as-is.
-    #[expect(dead_code)]
     #[expect(clippy::too_many_arguments)]
     fn dispatch_gmc_boot_event(
         command_id: u32,
         payload: &[u8],
-        bootloader: &GenericBootloader,
+        bootloader: Option<&GenericBootloader>,
         gsp_falcon: &Falcon<'_, Gsp>,
         sec2_falcon: &Falcon<'_, Sec2>,
         bar: Bar0<'_>,
         dev: &device::Device,
         bootloader_app_version: u32,
         libos_dma_handle: u64,
-    ) -> Result {
+    ) -> Result<QueuePointers> {
         match command_id {
-            GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER => Self::handle_load_exec_bootloader(
-                payload,
-                bootloader,
-                gsp_falcon,
-                sec2_falcon,
-                bar,
-                dev,
-                bootloader_app_version,
-                libos_dma_handle,
-            ),
+            GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER => {
+                let Some(bootloader) = bootloader else {
+                    dev_err!(
+                        dev,
+                        "GSP asked for the generic bootloader, which this chipset does not use\n"
+                    );
+                    return Err(EINVAL);
+                };
+
+                Self::handle_load_exec_bootloader(
+                    payload,
+                    bootloader,
+                    gsp_falcon,
+                    sec2_falcon,
+                    bar,
+                    dev,
+                    bootloader_app_version,
+                    libos_dma_handle,
+                )
+            }
             GMCAPI_CMD_EXEC_HS_BINARY => Self::handle_load_exec_hs_binary(
                 payload,
                 gsp_falcon,
@@ -227,6 +286,8 @@ impl super::Gsp {
     /// DMEM offset 0, places the generic bootloader in IMEM, points the requested FBIF aperture
     /// at the image, and runs the bootloader, which does the copy and jumps to the image.
     ///
+    /// Ends in [`Self::core_resume`], so a successful return is [`QueuePointers::Reset`].
+    ///
     /// # Errors
     ///
     /// - `EINVAL` if the payload is shorter than the parameter block, the descriptor is not the
@@ -243,7 +304,7 @@ impl super::Gsp {
         dev: &device::Device,
         bootloader_app_version: u32,
         libos_dma_handle: u64,
-    ) -> Result {
+    ) -> Result<QueuePointers> {
         let params = LoadExecGenericBootloaderParams::from_bytes_prefix(payload)
             .ok_or(EINVAL)?
             .0;
@@ -310,7 +371,9 @@ impl super::Gsp {
             dev,
             bootloader_app_version,
             libos_dma_handle,
-        )
+        )?;
+
+        Ok(QueuePointers::Reset)
     }
 
     /// Handle a `GMCAPI_CMD_EXEC_HS_BINARY` event.
@@ -318,6 +381,8 @@ impl super::Gsp {
     /// GSP-RM has already placed a high-security binary in the framebuffer. DMA it into falcon
     /// memory, program the BROM registers that make the falcon verify its PKC signature, run it,
     /// and resume GSP-RM.
+    ///
+    /// Ends in [`Self::core_resume`], so a successful return is [`QueuePointers::Reset`].
     ///
     /// # Errors
     ///
@@ -332,7 +397,7 @@ impl super::Gsp {
         dev: &device::Device,
         bootloader_app_version: u32,
         libos_dma_handle: u64,
-    ) -> Result {
+    ) -> Result<QueuePointers> {
         let params = HsBinaryParams::from_bytes_prefix(payload).ok_or(EINVAL)?.0;
 
         gsp_falcon.wait_for_processor_suspend().inspect_err(|_| {
@@ -425,7 +490,9 @@ impl super::Gsp {
             dev,
             bootloader_app_version,
             libos_dma_handle,
-        )
+        )?;
+
+        Ok(QueuePointers::Reset)
     }
 
     /// Shut down the GSP and wait until it is offline.
@@ -436,11 +503,17 @@ impl super::Gsp {
         mode: commands::PowerStateLevel,
     ) -> Result {
         // Command to shut the GSP down.
-        cmdq.send_command(bar, commands::UnloadingGuestDriver::new(mode))?;
+        commands::gsp_suspend(cmdq, bar, mode)?;
 
-        // Wait until GSP signals it is suspended.
+        // The drain matters as much as the wait: GSP-RM keeps posting messages while it tears
+        // down, the GSP event interrupt is already freed, and a full queue would stop it short
+        // of the suspend.
         read_poll_timeout(
-            || Ok(gsp_falcon.is_processor_suspended()),
+            || {
+                cmdq.drain(bar)?;
+
+                Ok(gsp_falcon.is_processor_suspended())
+            },
             |suspended| *suspended,
             Delta::from_millis(10),
             Delta::from_secs(5),

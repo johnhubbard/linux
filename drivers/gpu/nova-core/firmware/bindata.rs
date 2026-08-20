@@ -25,7 +25,6 @@ use crate::{
 ///
 /// - `ENOENT` if the metadata names a file that is not installed.
 /// - Errors from parsing the metadata and from [`Tlv::load_file`] are propagated as-is.
-#[expect(dead_code)]
 pub(crate) fn request_ucodes_firmware(
     dev: &device::Device,
     chipset: Chipset,

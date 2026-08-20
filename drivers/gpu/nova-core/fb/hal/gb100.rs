@@ -80,10 +80,27 @@ fn write_sysmem_flush_page_gb100(bar: Bar0<'_>, addr: Bounded<u64, 52>) {
     );
 }
 
-// This PMU reservation size is r570-specific.
+/// PMU backing store, per Open RM's `kpmuReservedMemoryBackingStoreSizeGet`.
+const PMU_BACKING_STORE_SIZE: usize = 9 * SZ_1M;
+
+/// PMU communication surfaces, per Open RM's `gpuGetPmuReservedMemorySurfacesSize`.
+const PMU_SURFACES_SIZE: usize = SZ_16M + SZ_256K;
+
+/// Miscellaneous PMU memory, per Open RM's `kpmuReservedMemoryMiscSizeGet`.
+const PMU_MISC_SIZE: usize = SZ_4K;
+
+/// Open RM reserves the backing store, the surfaces and the misc memory as one region above
+/// FRTS, aligned to `KPMU_RESERVED_MEMORY_ALIGNMENT` in `kpmuReservedMemorySizeGet`.
 pub(super) const fn pmu_reserved_size_gb100() -> u32 {
-    usize_into_u32::<{ const_align_up(SZ_8M + SZ_16M + SZ_4K, Alignment::new::<SZ_128K>()).unwrap() }>(
-    )
+    usize_into_u32::<
+        {
+            const_align_up(
+                PMU_BACKING_STORE_SIZE + PMU_SURFACES_SIZE + PMU_MISC_SIZE,
+                Alignment::new::<SZ_128K>(),
+            )
+            .unwrap()
+        },
+    >()
 }
 
 impl FbHal for Gb100 {
@@ -112,7 +129,7 @@ impl FbHal for Gb100 {
     }
 
     fn non_wpr_heap_size(&self) -> u64 {
-        // Non-WPR heap for GB10x (see Open RM: kgspGetNonWprHeapSize, GB100/GB102).
+        // Open RM's `kgspGetNonWprHeapSize` returns a flat 2 MiB for GB10x.
         u64::SZ_2M
     }
 
