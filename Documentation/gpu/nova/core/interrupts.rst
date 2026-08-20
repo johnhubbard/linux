@@ -450,10 +450,10 @@ thread to drain the queue::
 A halt and a posted message can be pending together, so the top half services
 every cause that the status reports.
 
-A drain fails when a message's framing or checksum is bad (see "Draining the
-GSP-to-CPU queue"). The message stays at the queue head, so every later drain
-would fail the same way, and the IRQ thread disables vector 155 and logs the
-failure, which leaves the queue unserviced until the device is reset.
+A drain fails when an element's framing is bad (see "Draining the GSP-to-CPU
+queue"). The element stays at the queue head, so every later drain would fail
+the same way, and the IRQ thread disables vector 155 and logs the failure,
+which leaves the queue unserviced until the device is reset.
 
 The handler, the self-test, and the rest of the driver read BAR0 through one
 shared mapping. nova-core unregisters an interrupt handler when the device
@@ -584,14 +584,14 @@ The sequence number takes no part in the match, because the GSP does not echo
 the command's sequence number on every reply. On r570 the reply to
 ``UnloadingGuestDriver`` carries sequence 0.
 
-The read pointer advances past every message that passes framing and checksum
-validation, whether it matched or was an event. A matched message that is too
-short to decode is the exception, and it stays at the queue head.
+The read pointer advances past every message that passes framing validation,
+whether it matched or was an event. A matched message that is too short to
+decode is the exception, and it stays at the queue head.
 
-A message's length is inside the region that the checksum covers, so once the
-framing or the checksum fails there is no trustworthy length with which to skip
-the message. Such a message also stays at the queue head, and every later
-receive fails on it with ``EIO`` until the device is reset.
+An element that fails framing validation has no trustworthy length, so the
+read pointer cannot advance past it. Such an element also stays at the queue
+head, and every later receive fails on it with ``EIO`` until the device is
+reset.
 
 The polling path and the IRQ thread both read the queue under the command-queue
 mutex. Replies and events share one queue and one read pointer, so one lock is
