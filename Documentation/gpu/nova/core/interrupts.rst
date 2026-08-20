@@ -450,7 +450,7 @@ thread to drain the queue::
 A halt and a posted message can be pending together, so the top half services
 every cause that the status reports.
 
-A drain fails when a message's framing or checksum is bad, which poisons the
+A drain fails when an element's framing is bad, and the bad framing poisons the
 queue (see "Draining the GSP-to-CPU queue"). Every later event would fail the
 same way, so the IRQ thread disables vector 155 and logs the failure, which
 leaves the queue unserviced until the device is reset.
@@ -582,11 +582,10 @@ The read pointer advances past every message, whether it matched, was an event,
 or matched but failed to decode, so a message is never left at the queue head
 for the next receive to parse again.
 
-Corrupt framing is the exception. A message's length is inside the region that
-the checksum covers, so once the framing or the checksum fails there is no
-trustworthy length with which to skip the message. Such a failure poisons the
-queue: nova-core logs it once, and every later receive fails with ``EIO`` until
-the device is reset.
+Corrupt framing is the exception. An element that fails framing validation has
+no trustworthy length, so the read pointer cannot advance past it. Such a
+failure poisons the queue: nova-core logs it once, and every later receive
+fails with ``EIO`` until the device is reset.
 
 The polling path and the IRQ thread both read the queue under the command-queue
 mutex. Replies and events share one queue and one read pointer, so one lock is

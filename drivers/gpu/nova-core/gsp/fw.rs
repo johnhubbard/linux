@@ -6,20 +6,14 @@ mod r000_00;
 mod r570_144;
 
 // Alias to avoid repeating the version number with every use.
-use r570_144 as bindings;
+use r000_00 as bindings;
 
 use core::ops::Range;
 
 use kernel::{
     bitfield,
-    dma::{
-        Coherent,
-        CoherentView, //
-    },
-    io::{
-        io_read,
-        io_write, //
-    },
+    dma::Coherent,
+    io::io_write,
     prelude::*,
     ptr::{
         Alignable,
@@ -41,15 +35,15 @@ use crate::{
         FbRanges,
         FbSizes, //
     },
-    firmware::gsp::GspFirmware,
+    firmware::{
+        bindata::UcodesImage,
+        gsp::GspFirmware, //
+    },
     gpu::{
         Architecture,
         Chipset, //
     },
-    gsp::{
-        cmdq::Cmdq, //
-        GSP_PAGE_SIZE,
-    },
+    gsp::{cmdq::Cmdq, GSP_PAGE_SHIFT, GSP_PAGE_SIZE},
     mctp::{
         MctpHeader,
         NvdmHeader,
@@ -62,8 +56,10 @@ use crate::{
 };
 
 /// Maximum size of a single GSP message queue element in bytes.
-pub(crate) const GSP_MSG_QUEUE_ELEMENT_SIZE_MAX: usize =
-    num::u32_as_usize(bindings::GSP_MSG_QUEUE_ELEMENT_SIZE_MAX);
+///
+/// GSP-RM reads this value at run time from the message queue init arguments rather than from a
+/// build-time constant, so the driver chooses it, and this constant is the one copy.
+pub(crate) const GSP_MSG_QUEUE_ELEMENT_SIZE_MAX: usize = GSP_PAGE_SIZE * 16;
 
 /// Empty type to group methods related to heap parameters for running the GSP firmware.
 enum GspFwHeapParams {}
@@ -97,7 +93,7 @@ impl GspFwHeapParams {
     fn management_overhead(fb_size: u64) -> Result<u64> {
         let fb_size_gb = fb_size.div_ceil(u64::SZ_1G);
 
-        u64::from(bindings::GSP_FW_HEAP_PARAM_SIZE_PER_GB_FB)
+        u64::from(bindings::GSP_FW_HEAP_PARAM_SIZE_PER_GB)
             .checked_mul(fb_size_gb)
             .ok_or(EINVAL)?
             .align_up(GSP_HEAP_ALIGNMENT)
@@ -304,7 +300,6 @@ pub(crate) enum MsgFunction {
     GspInitDone = bindings::NV_VGPU_MSG_EVENT_GSP_INIT_DONE,
     GspLockdownNotice = bindings::NV_VGPU_MSG_EVENT_GSP_LOCKDOWN_NOTICE,
     GspPostNoCat = bindings::NV_VGPU_MSG_EVENT_GSP_POST_NOCAT_RECORD,
-    GspRunCpuSequencer = bindings::NV_VGPU_MSG_EVENT_GSP_RUN_CPU_SEQUENCER,
     MmuFaultQueued = bindings::NV_VGPU_MSG_EVENT_MMU_FAULT_QUEUED,
     OsErrorLog = bindings::NV_VGPU_MSG_EVENT_OS_ERROR_LOG,
     PostEvent = bindings::NV_VGPU_MSG_EVENT_POST_EVENT,
@@ -351,9 +346,6 @@ impl TryFrom<u32> for MsgFunction {
             bindings::NV_VGPU_MSG_EVENT_GSP_INIT_DONE => Ok(MsgFunction::GspInitDone),
             bindings::NV_VGPU_MSG_EVENT_GSP_LOCKDOWN_NOTICE => Ok(MsgFunction::GspLockdownNotice),
             bindings::NV_VGPU_MSG_EVENT_GSP_POST_NOCAT_RECORD => Ok(MsgFunction::GspPostNoCat),
-            bindings::NV_VGPU_MSG_EVENT_GSP_RUN_CPU_SEQUENCER => {
-                Ok(MsgFunction::GspRunCpuSequencer)
-            }
             bindings::NV_VGPU_MSG_EVENT_MMU_FAULT_QUEUED => Ok(MsgFunction::MmuFaultQueued),
             bindings::NV_VGPU_MSG_EVENT_OS_ERROR_LOG => Ok(MsgFunction::OsErrorLog),
             bindings::NV_VGPU_MSG_EVENT_POST_EVENT => Ok(MsgFunction::PostEvent),
@@ -370,277 +362,6 @@ impl From<MsgFunction> for u32 {
         value as u32
     }
 }
-
-/// Sequencer buffer opcode for GSP sequencer commands.
-#[derive(Copy, Clone, Debug, PartialEq)]
-#[repr(u32)]
-pub(crate) enum SeqBufOpcode {
-    // Core operation opcodes
-    CoreReset = bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_CORE_RESET,
-    CoreResume = bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_CORE_RESUME,
-    CoreStart = bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_CORE_START,
-    CoreWaitForHalt = bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_CORE_WAIT_FOR_HALT,
-
-    // Delay opcode
-    DelayUs = bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_DELAY_US,
-
-    // Register operation opcodes
-    RegModify = bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_REG_MODIFY,
-    RegPoll = bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_REG_POLL,
-    RegStore = bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_REG_STORE,
-    RegWrite = bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_REG_WRITE,
-}
-
-impl TryFrom<u32> for SeqBufOpcode {
-    type Error = kernel::error::Error;
-
-    fn try_from(value: u32) -> Result<SeqBufOpcode> {
-        match value {
-            bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_CORE_RESET => {
-                Ok(SeqBufOpcode::CoreReset)
-            }
-            bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_CORE_RESUME => {
-                Ok(SeqBufOpcode::CoreResume)
-            }
-            bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_CORE_START => {
-                Ok(SeqBufOpcode::CoreStart)
-            }
-            bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_CORE_WAIT_FOR_HALT => {
-                Ok(SeqBufOpcode::CoreWaitForHalt)
-            }
-            bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_DELAY_US => Ok(SeqBufOpcode::DelayUs),
-            bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_REG_MODIFY => {
-                Ok(SeqBufOpcode::RegModify)
-            }
-            bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_REG_POLL => Ok(SeqBufOpcode::RegPoll),
-            bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_REG_STORE => Ok(SeqBufOpcode::RegStore),
-            bindings::GSP_SEQ_BUF_OPCODE_GSP_SEQ_BUF_OPCODE_REG_WRITE => Ok(SeqBufOpcode::RegWrite),
-            _ => Err(EINVAL),
-        }
-    }
-}
-
-impl From<SeqBufOpcode> for u32 {
-    fn from(value: SeqBufOpcode) -> Self {
-        // CAST: `SeqBufOpcode` is `repr(u32)` and can thus be cast losslessly.
-        value as u32
-    }
-}
-
-/// Wrapper for GSP sequencer register write payload.
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct RegWritePayload(bindings::GSP_SEQ_BUF_PAYLOAD_REG_WRITE);
-
-impl RegWritePayload {
-    /// Returns the register address.
-    pub(crate) fn addr(&self) -> u32 {
-        self.0.addr
-    }
-
-    /// Returns the value to write.
-    pub(crate) fn val(&self) -> u32 {
-        self.0.val
-    }
-}
-
-// SAFETY: This struct only contains integer types for which all bit patterns are valid.
-unsafe impl FromBytes for RegWritePayload {}
-
-// SAFETY: Padding is explicit and will not contain uninitialized data.
-unsafe impl AsBytes for RegWritePayload {}
-
-/// Wrapper for GSP sequencer register modify payload.
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct RegModifyPayload(bindings::GSP_SEQ_BUF_PAYLOAD_REG_MODIFY);
-
-impl RegModifyPayload {
-    /// Returns the register address.
-    pub(crate) fn addr(&self) -> u32 {
-        self.0.addr
-    }
-
-    /// Returns the mask to apply.
-    pub(crate) fn mask(&self) -> u32 {
-        self.0.mask
-    }
-
-    /// Returns the value to write.
-    pub(crate) fn val(&self) -> u32 {
-        self.0.val
-    }
-}
-
-// SAFETY: This struct only contains integer types for which all bit patterns are valid.
-unsafe impl FromBytes for RegModifyPayload {}
-
-// SAFETY: Padding is explicit and will not contain uninitialized data.
-unsafe impl AsBytes for RegModifyPayload {}
-
-/// Wrapper for GSP sequencer register poll payload.
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct RegPollPayload(bindings::GSP_SEQ_BUF_PAYLOAD_REG_POLL);
-
-impl RegPollPayload {
-    /// Returns the register address.
-    pub(crate) fn addr(&self) -> u32 {
-        self.0.addr
-    }
-
-    /// Returns the mask to apply.
-    pub(crate) fn mask(&self) -> u32 {
-        self.0.mask
-    }
-
-    /// Returns the expected value.
-    pub(crate) fn val(&self) -> u32 {
-        self.0.val
-    }
-
-    /// Returns the timeout in microseconds.
-    pub(crate) fn timeout(&self) -> u32 {
-        self.0.timeout
-    }
-}
-
-// SAFETY: This struct only contains integer types for which all bit patterns are valid.
-unsafe impl FromBytes for RegPollPayload {}
-
-// SAFETY: Padding is explicit and will not contain uninitialized data.
-unsafe impl AsBytes for RegPollPayload {}
-
-/// Wrapper for GSP sequencer delay payload.
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct DelayUsPayload(bindings::GSP_SEQ_BUF_PAYLOAD_DELAY_US);
-
-impl DelayUsPayload {
-    /// Returns the delay value in microseconds.
-    pub(crate) fn val(&self) -> u32 {
-        self.0.val
-    }
-}
-
-// SAFETY: This struct only contains integer types for which all bit patterns are valid.
-unsafe impl FromBytes for DelayUsPayload {}
-
-// SAFETY: Padding is explicit and will not contain uninitialized data.
-unsafe impl AsBytes for DelayUsPayload {}
-
-/// Wrapper for GSP sequencer register store payload.
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct RegStorePayload(bindings::GSP_SEQ_BUF_PAYLOAD_REG_STORE);
-
-impl RegStorePayload {
-    /// Returns the register address.
-    pub(crate) fn addr(&self) -> u32 {
-        self.0.addr
-    }
-
-    /// Returns the storage index.
-    #[allow(unused)]
-    pub(crate) fn index(&self) -> u32 {
-        self.0.index
-    }
-}
-
-// SAFETY: This struct only contains integer types for which all bit patterns are valid.
-unsafe impl FromBytes for RegStorePayload {}
-
-// SAFETY: Padding is explicit and will not contain uninitialized data.
-unsafe impl AsBytes for RegStorePayload {}
-
-/// Wrapper for GSP sequencer buffer command.
-#[repr(transparent)]
-pub(crate) struct SequencerBufferCmd(bindings::GSP_SEQUENCER_BUFFER_CMD);
-
-impl SequencerBufferCmd {
-    /// Returns the opcode as a `SeqBufOpcode` enum, or error if invalid.
-    pub(crate) fn opcode(&self) -> Result<SeqBufOpcode> {
-        self.0.opCode.try_into()
-    }
-
-    /// Returns the register write payload by value.
-    ///
-    /// Returns an error if the opcode is not `SeqBufOpcode::RegWrite`.
-    pub(crate) fn reg_write_payload(&self) -> Result<RegWritePayload> {
-        if self.opcode()? != SeqBufOpcode::RegWrite {
-            return Err(EINVAL);
-        }
-        // SAFETY: Opcode is verified to be `RegWrite`, so union contains valid `RegWritePayload`.
-        Ok(RegWritePayload(unsafe { self.0.payload.regWrite }))
-    }
-
-    /// Returns the register modify payload by value.
-    ///
-    /// Returns an error if the opcode is not `SeqBufOpcode::RegModify`.
-    pub(crate) fn reg_modify_payload(&self) -> Result<RegModifyPayload> {
-        if self.opcode()? != SeqBufOpcode::RegModify {
-            return Err(EINVAL);
-        }
-        // SAFETY: Opcode is verified to be `RegModify`, so union contains valid `RegModifyPayload`.
-        Ok(RegModifyPayload(unsafe { self.0.payload.regModify }))
-    }
-
-    /// Returns the register poll payload by value.
-    ///
-    /// Returns an error if the opcode is not `SeqBufOpcode::RegPoll`.
-    pub(crate) fn reg_poll_payload(&self) -> Result<RegPollPayload> {
-        if self.opcode()? != SeqBufOpcode::RegPoll {
-            return Err(EINVAL);
-        }
-        // SAFETY: Opcode is verified to be `RegPoll`, so union contains valid `RegPollPayload`.
-        Ok(RegPollPayload(unsafe { self.0.payload.regPoll }))
-    }
-
-    /// Returns the delay payload by value.
-    ///
-    /// Returns an error if the opcode is not `SeqBufOpcode::DelayUs`.
-    pub(crate) fn delay_us_payload(&self) -> Result<DelayUsPayload> {
-        if self.opcode()? != SeqBufOpcode::DelayUs {
-            return Err(EINVAL);
-        }
-        // SAFETY: Opcode is verified to be `DelayUs`, so union contains valid `DelayUsPayload`.
-        Ok(DelayUsPayload(unsafe { self.0.payload.delayUs }))
-    }
-
-    /// Returns the register store payload by value.
-    ///
-    /// Returns an error if the opcode is not `SeqBufOpcode::RegStore`.
-    pub(crate) fn reg_store_payload(&self) -> Result<RegStorePayload> {
-        if self.opcode()? != SeqBufOpcode::RegStore {
-            return Err(EINVAL);
-        }
-        // SAFETY: Opcode is verified to be `RegStore`, so union contains valid `RegStorePayload`.
-        Ok(RegStorePayload(unsafe { self.0.payload.regStore }))
-    }
-}
-
-// SAFETY: This struct only contains integer types for which all bit patterns are valid.
-unsafe impl FromBytes for SequencerBufferCmd {}
-
-// SAFETY: Padding is explicit and will not contain uninitialized data.
-unsafe impl AsBytes for SequencerBufferCmd {}
-
-/// Wrapper for GSP run CPU sequencer RPC.
-#[repr(transparent)]
-pub(crate) struct RunCpuSequencer(bindings::rpc_run_cpu_sequencer_v17_00);
-
-impl RunCpuSequencer {
-    /// Returns the command index.
-    pub(crate) fn cmd_index(&self) -> u32 {
-        self.0.cmdIndex
-    }
-}
-
-// SAFETY: This struct only contains integer types for which all bit patterns are valid.
-unsafe impl FromBytes for RunCpuSequencer {}
-
-// SAFETY: Padding is explicit and will not contain uninitialized data.
-unsafe impl AsBytes for RunCpuSequencer {}
 
 /// Struct containing the arguments required to pass a memory buffer to the GSP
 /// for use during initialisation.
@@ -703,71 +424,33 @@ impl LibosMemoryRegionInitArgument {
     }
 }
 
-/// TX header for setting up a message queue with the GSP.
+/// The msgq version that the driver uses.
+const MSGQ_VERSION_MAJOR: u16 = 2;
+const MSGQ_VERSION_MINOR: u16 = 0;
+
+/// The msgq TX header, which describes a queue to the GSP: the msgq version that the driver uses,
+/// and the queue's geometry. The queue pointers are in BAR0 registers rather than in this header.
 #[repr(transparent)]
 pub(crate) struct MsgqTxHeader(bindings::msgqTxHeader);
 
 impl MsgqTxHeader {
-    /// Create a new TX queue header.
-    ///
-    /// # Arguments
-    ///
-    /// * `msgq_size` - Total size of the message queue structure, in bytes.
-    /// * `rx_hdr_offset` - Offset, in bytes, of the start of the RX header in the message queue
-    ///   structure.
-    /// * `msg_count` - Number of messages that can be sent, i.e. the number of memory pages
-    ///   allocated for the message queue in the message queue structure.
-    pub(crate) fn new(msgq_size: u32, rx_hdr_offset: u32, msg_count: u32) -> Self {
+    /// Creates the msgq TX header of a queue of `msg_count` elements of `msg_size` bytes each,
+    /// whose first element starts `entry_off` bytes into the `msgq_size`-byte queue.
+    pub(crate) fn new(msgq_size: u32, msg_size: u32, msg_count: u32, entry_off: u32) -> Self {
         Self(bindings::msgqTxHeader {
-            version: 0,
+            versionMajor: MSGQ_VERSION_MAJOR,
+            versionMinor: MSGQ_VERSION_MINOR,
             size: msgq_size,
-            msgSize: num::usize_into_u32::<GSP_PAGE_SIZE>(),
+            msgSize: msg_size,
             msgCount: msg_count,
-            writePtr: 0,
-            flags: 1,
-            rxHdrOff: rx_hdr_offset,
-            entryOff: num::usize_into_u32::<GSP_PAGE_SIZE>(),
+            entryOff: entry_off,
+            reserved: [0; 3],
         })
-    }
-
-    /// Returns the value of the write pointer for this queue.
-    pub(crate) fn write_ptr(this: CoherentView<'_, Self>) -> u32 {
-        io_read!(this, .0.writePtr)
-    }
-
-    /// Sets the value of the write pointer for this queue.
-    pub(crate) fn set_write_ptr(this: CoherentView<'_, Self>, val: u32) {
-        io_write!(this, .0.writePtr, val)
     }
 }
 
 // SAFETY: Padding is explicit and does not contain uninitialized data.
 unsafe impl AsBytes for MsgqTxHeader {}
-
-/// RX header for setting up a message queue with the GSP.
-#[repr(transparent)]
-pub(crate) struct MsgqRxHeader(bindings::msgqRxHeader);
-
-/// Header for the message RX queue.
-impl MsgqRxHeader {
-    /// Creates a new RX queue header.
-    pub(crate) fn new() -> Self {
-        Self(Default::default())
-    }
-
-    /// Returns the value of the read pointer for this queue.
-    pub(crate) fn read_ptr(this: CoherentView<'_, Self>) -> u32 {
-        io_read!(this, .0.readPtr)
-    }
-
-    /// Sets the value of the read pointer for this queue.
-    pub(crate) fn set_read_ptr(this: CoherentView<'_, Self>, val: u32) {
-        io_write!(this, .0.readPtr, val)
-    }
-}
-
-// SAFETY: Padding is explicit and does not contain uninitialized data.
-unsafe impl AsBytes for MsgqRxHeader {}
 
 bitfield! {
     struct MsgHeaderVersion(u32) {
@@ -806,92 +489,87 @@ impl bindings::rpc_message_header_v {
     }
 }
 
-/// GSP Message Element.
-///
-/// This is essentially a message header expected to be followed by the message data.
-#[repr(transparent)]
+/// The headers that open an RPC queue element: the queue element header and the RPC header.
+#[repr(C)]
 pub(crate) struct GspMsgElement {
-    inner: bindings::GSP_MSG_QUEUE_ELEMENT,
+    element_header: QueueElementHeader,
+    rpc: bindings::rpc_message_header_v,
 }
 
+// `AsBytes` below requires that no padding separates the two headers.
+static_assert!(
+    size_of::<GspMsgElement>()
+        == size_of::<QueueElementHeader>() + size_of::<bindings::rpc_message_header_v>()
+);
+
 impl GspMsgElement {
-    /// Creates a new message element.
-    ///
-    /// # Arguments
-    ///
-    /// * `sequence` - Sequence number of the message.
-    /// * `cmd_size` - Size of the command (not including the message element), in bytes.
-    /// * `function` - Function of the message.
-    pub(crate) fn init(
-        sequence: u32,
-        cmd_size: usize,
-        function: MsgFunction,
-    ) -> impl Init<Self, Error> {
+    /// Creates the queue element header and the RPC header of a command with a `cmd_size`-byte
+    /// payload.
+    pub(crate) fn init(cmd_size: usize, function: MsgFunction) -> impl Init<Self, Error> {
         type RpcMessageHeader = bindings::rpc_message_header_v;
-        type InnerGspMsgElement = bindings::GSP_MSG_QUEUE_ELEMENT;
-        let init_inner = try_init!(InnerGspMsgElement {
-            seqNum: sequence,
-            elemCount: size_of::<Self>()
-                .checked_add(cmd_size)
-                .ok_or(EOVERFLOW)?
-                .div_ceil(GSP_PAGE_SIZE)
-                .try_into()
-                .map_err(|_| EOVERFLOW)?,
-            rpc <- RpcMessageHeader::init(cmd_size, function),
-            ..Zeroable::init_zeroed()
-        });
 
         try_init!(GspMsgElement {
-            inner <- init_inner,
+            element_header: QueueElementHeader::new(
+                NvdmType::RmRpc,
+                size_of::<RpcMessageHeader>()
+                    .checked_add(cmd_size)
+                    .ok_or(EOVERFLOW)?,
+            )?,
+            rpc <- RpcMessageHeader::init(cmd_size, function),
         })
     }
 
-    /// Sets the checksum of this message.
-    ///
-    /// Since the header is also part of the checksum, this is usually called after the whole
-    /// message has been written to the shared memory area.
-    pub(crate) fn set_checksum(&mut self, checksum: u32) {
-        self.inner.checkSum = checksum;
+    /// Returns the length of the payload that follows the RPC header, or `None` if the message
+    /// length in the queue element header is shorter than the RPC header.
+    pub(crate) fn payload_length(&self) -> Option<usize> {
+        self.element_header
+            .payload_len(size_of::<bindings::rpc_message_header_v>())
     }
 
-    /// Returns the length of the message's payload.
-    pub(crate) fn payload_length(&self) -> usize {
-        // `rpc.length` includes the length of the RPC message header.
-        num::u32_as_usize(self.inner.rpc.length)
-            .saturating_sub(size_of::<bindings::rpc_message_header_v>())
-    }
-
-    /// Returns the total length of the message, message and RPC headers included.
+    /// Returns the length of the whole element, both headers included.
     pub(crate) fn length(&self) -> usize {
-        size_of::<Self>() + self.payload_length()
+        self.element_header.element_len()
+    }
+
+    /// Validates the queue element header and that the element is long enough to hold the RPC
+    /// header after it.
+    ///
+    /// # Errors
+    ///
+    /// - `EIO` if [`QueueElementHeader::validate`] fails, or if the element length in the queue
+    ///   element header is shorter than the two headers together.
+    pub(crate) fn validate_framing(&self) -> Result {
+        self.element_header.validate().map_err(|_| EIO)?;
+
+        if self.length() < size_of::<Self>() {
+            return Err(EIO);
+        }
+
+        Ok(())
     }
 
     // Returns the sequence number of the message.
     pub(crate) fn sequence(&self) -> u32 {
-        self.inner.rpc.sequence
+        self.rpc.sequence
     }
 
     // Returns the function of the message, if it is valid, or the invalid function number as an
     // error.
     pub(crate) fn function(&self) -> Result<MsgFunction, u32> {
-        self.inner
-            .rpc
-            .function
-            .try_into()
-            .map_err(|_| self.inner.rpc.function)
+        self.rpc.function.try_into().map_err(|_| self.rpc.function)
     }
 
     // Returns the number of elements (i.e. memory pages) used by this message.
     pub(crate) fn element_count(&self) -> u32 {
-        self.inner.elemCount
+        self.element_header.element_count()
     }
 }
 
-// SAFETY: Padding is explicit and does not contain uninitialized data.
+// SAFETY: All fields are integer types or contain only integer types, with no
+// uninitialized padding bytes.
 unsafe impl AsBytes for GspMsgElement {}
 
-// SAFETY: This struct only contains integer types for which all bit patterns
-// are valid.
+// SAFETY: All fields are integer types for which all bit patterns are valid.
 unsafe impl FromBytes for GspMsgElement {}
 
 /// First word of every queue element: `"MCTP"` in ASCII.
@@ -929,33 +607,33 @@ pub(crate) struct QueueElementHeader {
 
 static_assert!(
     core::mem::offset_of!(QueueElementHeader, magic)
-        == core::mem::offset_of!(r000_00::GSP_MSG_QUEUE_ELEMENT, mctpMagic)
+        == core::mem::offset_of!(bindings::GSP_MSG_QUEUE_ELEMENT, mctpMagic)
 );
 static_assert!(
     core::mem::offset_of!(QueueElementHeader, element_len)
-        == core::mem::offset_of!(r000_00::GSP_MSG_QUEUE_ELEMENT, mctpPayloadSize)
+        == core::mem::offset_of!(bindings::GSP_MSG_QUEUE_ELEMENT, mctpPayloadSize)
 );
 static_assert!(
     core::mem::offset_of!(QueueElementHeader, mctp)
-        == core::mem::offset_of!(r000_00::GSP_MSG_QUEUE_ELEMENT, mctpHeader)
+        == core::mem::offset_of!(bindings::GSP_MSG_QUEUE_ELEMENT, mctpHeader)
 );
 static_assert!(
     core::mem::offset_of!(QueueElementHeader, nvdm)
-        == core::mem::offset_of!(r000_00::GSP_MSG_QUEUE_ELEMENT, nvdmHeader)
+        == core::mem::offset_of!(bindings::GSP_MSG_QUEUE_ELEMENT, nvdmHeader)
 );
 static_assert!(
     core::mem::offset_of!(QueueElementHeader, message_len)
-        == core::mem::offset_of!(r000_00::GSP_MSG_QUEUE_ELEMENT, __bindgen_anon_1)
+        == core::mem::offset_of!(bindings::GSP_MSG_QUEUE_ELEMENT, __bindgen_anon_1)
             + core::mem::offset_of!(
-                r000_00::GSP_MSG_QUEUE_ELEMENT__bindgen_ty_1__bindgen_ty_2,
+                bindings::GSP_MSG_QUEUE_ELEMENT__bindgen_ty_1__bindgen_ty_2,
                 nvdmPayloadSize
             )
 );
 static_assert!(
     core::mem::offset_of!(QueueElementHeader, reserved)
-        == core::mem::offset_of!(r000_00::GSP_MSG_QUEUE_ELEMENT, __bindgen_anon_1)
+        == core::mem::offset_of!(bindings::GSP_MSG_QUEUE_ELEMENT, __bindgen_anon_1)
             + core::mem::offset_of!(
-                r000_00::GSP_MSG_QUEUE_ELEMENT__bindgen_ty_1__bindgen_ty_2,
+                bindings::GSP_MSG_QUEUE_ELEMENT__bindgen_ty_1__bindgen_ty_2,
                 reserved
             )
 );
@@ -963,8 +641,8 @@ static_assert!(
 // two length words, as `GSP_MSG_QUEUE_ELEMENT_SIZE_NO_ENCRYPTION` in Open RM defines it.
 static_assert!(
     size_of::<QueueElementHeader>()
-        == core::mem::offset_of!(r000_00::GSP_MSG_QUEUE_ELEMENT, __bindgen_anon_1)
-            + size_of::<r000_00::GSP_MSG_QUEUE_ELEMENT__bindgen_ty_1__bindgen_ty_2>()
+        == core::mem::offset_of!(bindings::GSP_MSG_QUEUE_ELEMENT, __bindgen_anon_1)
+            + size_of::<bindings::GSP_MSG_QUEUE_ELEMENT__bindgen_ty_1__bindgen_ty_2>()
 );
 
 impl QueueElementHeader {
@@ -1084,42 +762,42 @@ const GMCAPI_COMMAND_ID_MASK: u32 = 0x00ff_ffff;
 
 /// GMC request that carries the system information and registry keys to GSP-RM. GSP-RM answers
 /// it with the static GPU configuration once it has finished starting.
-pub(crate) const GMCAPI_CMD_GSP_INIT: u32 = r000_00::GMCAPI_COMMANDS_GMCAPI_CMD_GSP_INIT;
+pub(crate) const GMCAPI_CMD_GSP_INIT: u32 = bindings::GMCAPI_COMMANDS_GMCAPI_CMD_GSP_INIT;
 
 /// GMC event that requests the driver to run the generic falcon bootloader on the descriptor that
 /// the event carries.
 pub(crate) const GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER: u32 =
-    r000_00::GMCAPI_COMMANDS_GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER;
+    bindings::GMCAPI_COMMANDS_GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER;
 
 /// GMC event that requests the driver to run a Heavy-Secured (HS) binary that GSP-RM has placed in
 /// the framebuffer.
 pub(crate) const GMCAPI_CMD_EXEC_HS_BINARY: u32 =
-    r000_00::GMCAPI_COMMANDS_GMCAPI_CMD_EXEC_HS_BINARY;
+    bindings::GMCAPI_COMMANDS_GMCAPI_CMD_EXEC_HS_BINARY;
 
 /// GMC request for GSP-RM to suspend. GSP-RM sends no response, and reports the completed
 /// suspend in the GSP falcon's `MAILBOX0` instead.
-pub(crate) const GMCAPI_CMD_GSP_SUSPEND: u32 = r000_00::GMCAPI_COMMANDS_GMCAPI_CMD_GSP_SUSPEND;
+pub(crate) const GMCAPI_CMD_GSP_SUSPEND: u32 = bindings::GMCAPI_COMMANDS_GMCAPI_CMD_GSP_SUSPEND;
 
-static_assert!(size_of::<GmcApiHeader>() == size_of::<r000_00::GMCAPI_HEADER>());
+static_assert!(size_of::<GmcApiHeader>() == size_of::<bindings::GMCAPI_HEADER>());
 static_assert!(
     core::mem::offset_of!(GmcApiHeader, command)
-        == core::mem::offset_of!(r000_00::GMCAPI_HEADER, command)
+        == core::mem::offset_of!(bindings::GMCAPI_HEADER, command)
 );
 static_assert!(
     core::mem::offset_of!(GmcApiHeader, size)
-        == core::mem::offset_of!(r000_00::GMCAPI_HEADER, size)
+        == core::mem::offset_of!(bindings::GMCAPI_HEADER, size)
 );
 static_assert!(
     core::mem::offset_of!(GmcApiHeader, sequence)
-        == core::mem::offset_of!(r000_00::GMCAPI_HEADER, sequence)
+        == core::mem::offset_of!(bindings::GMCAPI_HEADER, sequence)
 );
 static_assert!(
     core::mem::offset_of!(GmcApiHeader, max_resp_or_status)
-        == core::mem::offset_of!(r000_00::GMCAPI_HEADER, __bindgen_anon_1)
+        == core::mem::offset_of!(bindings::GMCAPI_HEADER, __bindgen_anon_1)
 );
 static_assert!(
     core::mem::offset_of!(GmcApiHeader, reserved)
-        == core::mem::offset_of!(r000_00::GMCAPI_HEADER, reserved)
+        == core::mem::offset_of!(bindings::GMCAPI_HEADER, reserved)
 );
 
 impl GmcApiHeader {
@@ -1212,6 +890,12 @@ unsafe impl AsBytes for GspGmcMsgElement {}
 // SAFETY: All fields are integer types for which all bit patterns are valid.
 unsafe impl FromBytes for GspGmcMsgElement {}
 
+/// First word of `GSP_ARGUMENTS_CACHED`: `"GSP "` in ASCII.
+const GSP_ARGUMENTS_MAGIC_VALUE: u32 = 0x2050_5347;
+
+/// Flag that requests GSP-RM to place its stack in DMEM.
+const GSP_ARGUMENTS_FLAG_STACK_IN_DMEM: u64 = 0x02;
+
 /// Arguments for GSP startup.
 #[repr(transparent)]
 #[derive(Zeroable)]
@@ -1220,11 +904,21 @@ pub(crate) struct GspArgumentsCached {
 }
 
 impl GspArgumentsCached {
-    /// Creates the arguments for starting the GSP up using `cmdq` as its command queue.
-    pub(crate) fn new<'a, 'b>(cmdq: &'a Cmdq<'b>) -> impl Init<Self> + use<'a, 'b> {
+    /// Creates the arguments for starting the GSP, with `cmdq` as its command queue and
+    /// `state_monitor` as the buffer in which GSP-RM reports its own state.
+    pub(crate) fn new<'a, 'b>(
+        cmdq: &'a Cmdq<'b>,
+        state_monitor: &'a Coherent<'b, [u8; GSP_PAGE_SIZE]>,
+    ) -> impl Init<Self> + use<'a, 'b> {
         let init_inner = init!(bindings::GSP_ARGUMENTS_CACHED {
+            magic: GSP_ARGUMENTS_MAGIC_VALUE,
+            size: num::usize_into_u16::<{ size_of::<bindings::GSP_ARGUMENTS_CACHED>() }>(),
+            flags: GSP_ARGUMENTS_FLAG_STACK_IN_DMEM,
             messageQueueInitArguments <- MessageQueueInitArguments::new(cmdq),
-            bDmemStack: 1,
+            rmStateMonitorBufferArgs: bindings::GSP_ARGUMENTS_CACHED__bindgen_ty_3 {
+                pa: state_monitor.dma_address(),
+                size: num::usize_as_u64(state_monitor.size()),
+            },
             ..Zeroable::init_zeroed()
         });
 
@@ -1248,11 +942,22 @@ pub(crate) struct GspArgumentsPadded {
 }
 
 impl GspArgumentsPadded {
-    pub(crate) fn new<'a, 'b>(cmdq: &'a Cmdq<'b>) -> impl Init<Self> + use<'a, 'b> {
+    pub(crate) fn new<'a, 'b>(
+        cmdq: &'a Cmdq<'b>,
+        state_monitor: &'a Coherent<'b, [u8; GSP_PAGE_SIZE]>,
+    ) -> impl Init<Self> + use<'a, 'b> {
         init!(GspArgumentsPadded {
-            inner <- GspArgumentsCached::new(cmdq),
+            inner <- GspArgumentsCached::new(cmdq, state_monitor),
             ..Zeroable::init_zeroed()
         })
+    }
+
+    /// Records where `ucodes` is mapped.
+    ///
+    /// GSP-RM reads the arguments once, when it starts, so a write after that point has no effect.
+    pub(crate) fn set_bindata(this: &Coherent<'_, Self>, ucodes: &UcodesImage<'_>) {
+        io_write!(this, .inner.inner.bindataArgs.radix3, ucodes.radix3_dma_address());
+        io_write!(this, .inner.inner.bindataArgs.size, num::usize_as_u64(ucodes.size()));
     }
 }
 
@@ -1274,6 +979,15 @@ impl MessageQueueInitArguments {
             pageTableEntryCount: num::usize_into_u32::<{ Cmdq::NUM_PTES }>(),
             cmdQueueOffset: num::usize_as_u64(Cmdq::CMDQ_OFFSET),
             statQueueOffset: num::usize_as_u64(Cmdq::STATQ_OFFSET),
+
+            queueElementHdrSize: num::usize_into_u32::<{ size_of::<QueueElementHeader>() }>(),
+            queueElementSizeMin: num::usize_into_u32::<GSP_PAGE_SIZE>(),
+            queueElementSizeMax: num::usize_into_u32::<GSP_MSG_QUEUE_ELEMENT_SIZE_MAX>(),
+
+            // Both alignments are log2 values, which GSP-RM applies as `1 << n`.
+            queueHeaderAlign: 4,
+            queueElementAlign: num::usize_into_u32::<GSP_PAGE_SHIFT>(),
+
             ..Zeroable::init_zeroed()
         })
     }
@@ -1298,7 +1012,9 @@ impl GspAcrBootGspRmParams {
             bIsGspRmBoot: 1,
             wprCarveoutOffset: 0,
             wprCarveoutSize: 0,
-            __bindgen_padding_0: Default::default(),
+            bInstInSysMode: 0,
+            bIcuEnabled: 0,
+            bScrubCbcSr: 0,
         });
 
         params
@@ -1311,8 +1027,8 @@ impl GspRmParams {
     fn new(target: GspDmaTarget, libos_addr: u64) -> impl Init<Self> {
         let params = init!(Self {
             target: target as u32,
+            reserved: 0,
             bootArgsOffset: libos_addr,
-            __bindgen_padding_0: Default::default(),
         });
 
         params
@@ -1320,6 +1036,9 @@ impl GspRmParams {
 }
 
 pub(crate) type GspFmcBootParams = bindings::GSP_FMC_BOOT_PARAMS;
+
+/// Magic value opening the ABI-stable `GSP_FMC_BOOT_PARAMS` header: `"FMC "` in ASCII.
+const GSP_FMC_BOOT_PARAMS_MAGIC: u32 = 0x2043_4d46;
 
 // SAFETY: Padding is explicit and will not contain uninitialized data.
 unsafe impl AsBytes for GspFmcBootParams {}
@@ -1329,6 +1048,8 @@ unsafe impl FromBytes for GspFmcBootParams {}
 impl GspFmcBootParams {
     pub(crate) fn new(wpr_meta_addr: u64, libos_addr: u64) -> impl Init<Self> {
         let init = init!(Self {
+            magic: GSP_FMC_BOOT_PARAMS_MAGIC,
+            size: num::usize_into_u16::<{ size_of::<Self>() }>(),
             // Blackwell FSP obtains WPR info from other sources, so
             // wprCarveoutOffset and wprCarveoutSize are left zero.
             bootGspRmParams <- GspAcrBootGspRmParams::new(GspDmaTarget::CoherentSystem,
