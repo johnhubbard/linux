@@ -618,7 +618,7 @@ impl QueueElementHeader {
     }
 
     /// Returns the length of the whole element, this header included.
-    fn element_len(&self) -> usize {
+    pub(crate) fn element_len(&self) -> usize {
         num::u32_as_usize(self.element_len)
     }
 
@@ -633,8 +633,13 @@ impl QueueElementHeader {
             .div_ceil(num::usize_into_u32::<GSP_PAGE_SIZE>())
     }
 
-    fn is_nvdm_type(&self, nvdm_type: NvdmType) -> bool {
-        self.nvdm.validate(nvdm_type)
+    /// Returns the NVDM type.
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` if the field holds no known NVDM type.
+    pub(crate) fn nvdm_type(&self) -> Result<NvdmType> {
+        self.nvdm.nvdm_type()
     }
 
     /// Validates the transport headers, so that the lengths they declare can be trusted.
@@ -646,7 +651,7 @@ impl QueueElementHeader {
     ///
     /// - `EIO` if the magic, the MCTP version or the NVIDIA vendor id is wrong, or if the
     ///   declared element length is below `header_len` or above the maximum element size.
-    fn validate(&self, header_len: usize) -> Result {
+    pub(crate) fn validate(&self, header_len: usize) -> Result {
         if self.magic != MCTP_MAGIC
             || !self.mctp.has_expected_version()
             || !self.nvdm.has_nvidia_vendor()
@@ -793,12 +798,6 @@ impl GspGmcMsgElement {
     /// Validates the transport headers. See [`QueueElementHeader::validate`].
     pub(crate) fn validate_framing(&self) -> Result {
         self.transport.validate(size_of::<Self>())
-    }
-
-    /// Returns whether a GMC header follows the transport headers. When this is `false`, `gmc`
-    /// holds whatever header the other kind of element puts there.
-    pub(crate) fn is_gmc_api(&self) -> bool {
-        self.transport.is_nvdm_type(NvdmType::GmcApi)
     }
 
     /// Returns the number of queue slots this element occupies.
