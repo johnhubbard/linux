@@ -26,7 +26,6 @@ pub(crate) mod commands;
 mod fw;
 mod nvkv;
 mod regs;
-mod sequencer;
 
 pub(crate) use fw::{
     GspFmcBootParams,
@@ -195,8 +194,12 @@ impl<'gsp> Gsp<'gsp> {
 
             Ok(try_pin_init!(Self {
                 cmdq <- Cmdq::new(dev, bar),
-                rmargs: Coherent::init(dev, GFP_KERNEL, GspArgumentsPadded::new(&cmdq))?,
                 rm_state_monitor: Coherent::zeroed(dev, GFP_KERNEL)?,
+                rmargs: Coherent::init(
+                    dev,
+                    GFP_KERNEL,
+                    GspArgumentsPadded::new(&cmdq, rm_state_monitor),
+                )?,
                 libos: {
                     let mut libos = CoherentBox::zeroed_slice(
                         dev,
@@ -254,7 +257,7 @@ pub(crate) struct UnloadBundle<'a>(KBox<dyn hal::UnloadBundle + 'a>);
 /// The results of [`Gsp::boot`]: the static GPU configuration and the unload bundle.
 pub(crate) struct BootResult<'a> {
     unload_bundle: Option<UnloadBundle<'a>>,
-    /// The static GPU configuration, as GSP-RM reported it at the end of boot.
+    /// The static GPU configuration, as decoded from the `GSP_INIT` reply.
     pub(crate) static_info: commands::GspStaticInfo,
 }
 

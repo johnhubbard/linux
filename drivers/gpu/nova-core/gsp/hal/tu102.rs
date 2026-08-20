@@ -40,7 +40,6 @@ use crate::{
             UnloadBundle, //
         },
         regs,
-        sequencer::GspSequencer,
         Gsp,
         GspBootContext,
         GspFwWprMeta, //
@@ -314,17 +313,6 @@ impl GspHal for Tu102 {
         )?;
 
         Ok(unload_guard.dismiss())
-    }
-
-    fn post_boot(
-        &self,
-        gsp: &Gsp<'_>,
-        ctx: &mut GspBootContext<'_, '_>,
-        gsp_fw: &GspFirmware<'_>,
-    ) -> Result {
-        GspSequencer::run(&gsp.cmdq, ctx, &gsp.libos, gsp_fw.bootloader.app_version)?;
-
-        Ok(())
     }
 }
 

@@ -24,7 +24,6 @@ use crate::{
 /// - `EINVAL` if the metadata is malformed or lacks the `FILE` or `SIZE` tag.
 /// - `ENODATA` if `SIZE` is zero.
 /// - `ENOMEM` if the image buffer cannot be allocated.
-#[expect(dead_code)]
 pub(crate) fn request_ucodes_firmware(dev: &device::Device, chipset: Chipset) -> Result<VVec<u8>> {
     let firmware = request_tlv(dev, chipset, "ucodes")?;
     let tlv = Tlv::new(firmware.data())?;

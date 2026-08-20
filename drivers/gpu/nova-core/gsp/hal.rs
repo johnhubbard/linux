@@ -41,19 +41,6 @@ pub(super) trait GspHal: Send {
         ctx: &mut GspBootContext<'_, 'gpu>,
         gsp_fw: &GspFirmware<'gpu>,
     ) -> Result<Option<super::UnloadBundle<'gpu>>>;
-
-    /// Performs HAL-specific post-GSP boot tasks.
-    ///
-    /// This method is called by the GSP boot code after the GSP is confirmed to be running, and
-    /// after the initialization commands have been pushed onto its queue.
-    fn post_boot(
-        &self,
-        _gsp: &Gsp<'_>,
-        _ctx: &mut GspBootContext<'_, '_>,
-        _gsp_fw: &GspFirmware<'_>,
-    ) -> Result {
-        Ok(())
-    }
 }
 
 /// Returns the names of the firmware files required to boot the GSP of `chipset`, in addition to
@@ -76,7 +63,6 @@ pub(crate) const fn boot_firmware_files(chipset: Chipset) -> &'static [&'static 
 }
 
 /// Returns true if `chipset` boots its GSP through the generic falcon bootloader.
-#[expect(dead_code)]
 pub(super) const fn uses_generic_bootloader(chipset: Chipset) -> bool {
     matches!(chipset.arch(), Architecture::Turing) || matches!(chipset, Chipset::GA100)
 }

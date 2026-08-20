@@ -28,20 +28,25 @@ use crate::{
         FalconModSelAlgo, //
     },
     firmware::{
+        bindata::request_ucodes_firmware,
         gen_bootloader::{
             BootloaderDmemDescV2,
             GenericBootloader, //
         },
         gsp::GspFirmware,
+        radix3::Radix3, //
     },
     gsp::{
         cmdq::Cmdq,
         commands,
         fw::{
+            BindataArgs,
+            GspArgumentsPadded,
             GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER,
             GMCAPI_CMD_EXEC_HS_BINARY, //
         }, //
     },
+    num,
     regs, //
 };
 
@@ -67,6 +72,10 @@ impl<'gsp> super::Gsp<'gsp> {
     ///
     /// On return, the GSP is running, and the caller gets the static configuration it reported
     /// and the unload bundle for [`Self::unload`].
+    ///
+    /// # Errors
+    ///
+    /// - `ENOENT` if the ucodes image is not installed.
     pub(crate) fn boot(
         self: Pin<&mut Self>,
         mut ctx: super::GspBootContext<'_, 'gsp>,
@@ -79,10 +88,18 @@ impl<'gsp> super::Gsp<'gsp> {
 
         let gsp_fw = KBox::pin_init(GspFirmware::new(dev, chipset), GFP_KERNEL)?;
 
-        self.cmdq
-            .send_command_no_wait(commands::SetSystemInfo::new(pdev, chipset))?;
-        self.cmdq
-            .send_command_no_wait(commands::SetRegistry::new(ctx.vgpu.state())?)?;
+        // GSP-RM reads the ucodes image through this page table only while it starts up, so the
+        // table is freed when the boot sequence returns.
+        let ucodes = request_ucodes_firmware(dev, chipset)?;
+        let ucodes_size = ucodes.len();
+        let ucodes_radix3 = KBox::pin_init(Radix3::new(dev, ucodes), GFP_KERNEL)?;
+        GspArgumentsPadded::set_bindata(
+            &self.rmargs,
+            &BindataArgs {
+                radix3: ucodes_radix3.dma_address(),
+                size: num::usize_as_u64(ucodes_size),
+            },
+        );
 
         // Perform the chipset-specific boot sequence, and retrieve the unload bundle.
         let unload_bundle = hal.boot(&self, &mut ctx, &gsp_fw)?.or_else(|| {
@@ -113,12 +130,24 @@ impl<'gsp> super::Gsp<'gsp> {
 
         dev_dbg!(pdev, "RISC-V active? {}\n", gsp_falcon.is_riscv_active(),);
 
-        hal.post_boot(&self, ctx, &gsp_fw)?;
+        let init_payload = commands::build_gsp_init_payload(pdev, chipset, ctx.vgpu.state())?;
+        let bootloader = if super::hal::uses_generic_bootloader(chipset) {
+            Some(GenericBootloader::new(dev, chipset, gsp_falcon)?)
+        } else {
+            None
+        };
+        let load_exec = LoadExecContext {
+            bootloader: bootloader.as_ref(),
+            gsp_falcon,
+            sec2_falcon: ctx.sec2_falcon,
+            dev,
+            bootloader_app_version: gsp_fw.bootloader.app_version,
+            libos_dma_handle: self.libos.dma_address(),
+        };
 
-        // Wait until GSP is fully initialized.
-        commands::wait_gsp_init_done(&self.cmdq)?;
-
-        let static_info = self.cmdq.send_command(commands::GetGspStaticInfo)?;
+        let static_info = commands::gsp_init(&self.cmdq, &init_payload, |command_id, payload| {
+            Self::dispatch_gmc_boot_event(&load_exec, command_id, payload)
+        })?;
 
         Ok(super::BootResult {
             unload_bundle: unload_guard.dismiss().1,
@@ -187,7 +216,6 @@ impl<'gsp> super::Gsp<'gsp> {
     /// - `EINVAL` if `command_id` is not a load-and-execute command.
     ///
     /// Errors from the handlers are propagated as-is.
-    #[expect(dead_code)]
     fn dispatch_gmc_boot_event(
         ctx: &LoadExecContext<'_, '_>,
         command_id: u32,
@@ -387,12 +415,16 @@ impl<'gsp> super::Gsp<'gsp> {
         gsp_falcon: &Falcon<'_, Gsp>,
         mode: commands::PowerStateLevel,
     ) -> Result {
-        // Command to shut the GSP down.
-        cmdq.send_command(commands::UnloadingGuestDriver::new(mode))?;
+        commands::gsp_suspend(cmdq, mode)?;
 
-        // Wait until GSP signals it is suspended.
+        // GSP-RM posts messages while it suspends, and the GSP event interrupt is already freed,
+        // so this poll drains them.
         read_poll_timeout(
-            || Ok(gsp_falcon.is_processor_suspended()),
+            || {
+                cmdq.drain()?;
+
+                Ok(gsp_falcon.is_processor_suspended())
+            },
             |suspended| *suspended,
             Delta::from_millis(10),
             Delta::from_secs(5),
