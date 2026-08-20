@@ -946,6 +946,18 @@ impl CmdqInner {
             return Err(EIO);
         };
 
+        // Checked before any length field is read, since bad framing leaves them untrusted.
+        if let Err(e) = header.validate_framing() {
+            dev_err!(
+                &self.dev,
+                "GSP RPC: receive: Call {} - bad MCTP framing, declared length {}\n",
+                header.sequence(),
+                header.length(),
+            );
+            self.poisoned.set(true);
+            return Err(e);
+        }
+
         let payload_length = header.payload_length();
 
         // Check that the driver read area is large enough for the message.
@@ -966,16 +978,6 @@ impl CmdqInner {
                 slice_2.split_at(payload_length - slice_1.len()).0,
             )
         };
-
-        if !header.has_valid_magic() {
-            dev_err!(
-                &self.dev,
-                "GSP RPC: receive: Call {} - bad MCTP magic\n",
-                header.sequence()
-            );
-            self.poisoned.set(true);
-            return Err(EIO);
-        }
 
         Ok(GspMessage {
             header,

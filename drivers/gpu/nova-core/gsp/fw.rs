@@ -574,9 +574,20 @@ impl GspMsgElement {
         num::u32_as_usize(self.mctp_payload_size)
     }
 
-    /// Returns `true` if the MCTP magic field contains the expected value.
-    pub(crate) fn has_valid_magic(&self) -> bool {
-        self.mctp_magic == MCTP_MAGIC
+    /// Validates the transport framing, before any length field in the element is trusted.
+    ///
+    /// # Errors
+    ///
+    /// - `EIO` if the MCTP magic, the MCTP version, the NVDM vendor id, or the declared element
+    ///   length is not one this driver accepts.
+    pub(crate) fn validate_framing(&self) -> Result {
+        validate_mctp_framing(
+            self.mctp_magic,
+            self.mctp_payload_size,
+            self.mctp_header,
+            self.nvdm_header,
+            size_of::<Self>(),
+        )
     }
 
     // Returns the sequence number of the message.
