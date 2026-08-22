@@ -45,6 +45,7 @@ use crate::{
         commands,
         fw::{
             BindataArgs,
+            GmcCommand,
             GspArgumentsPadded,
             GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER,
             GMCAPI_CMD_EXEC_HS_BINARY, //
@@ -278,8 +279,8 @@ impl super::Gsp {
             _ => {
                 dev_err!(
                     dev,
-                    "Unexpected GMC boot event: command_id={:#010x}\n",
-                    command_id
+                    "Unexpected GMC boot event: command={}\n",
+                    GmcCommand(command_id)
                 );
                 Err(EINVAL)
             }

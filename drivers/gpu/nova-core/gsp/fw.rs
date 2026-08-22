@@ -12,6 +12,7 @@ use core::ops::Range;
 use kernel::{
     bitfield,
     dma::Coherent,
+    fmt,
     io::io_write,
     prelude::*,
     ptr::{
@@ -721,6 +722,72 @@ unsafe impl AsBytes for GmcApiHeader {}
 
 // SAFETY: All fields are integer types for which all bit patterns are valid.
 unsafe impl FromBytes for GmcApiHeader {}
+
+/// [`fmt::Display`] writes the command name and the numeric id, for example
+/// `GSP_INIT (0x10001)`. An unrecognized id writes `UNKNOWN` and the same numeric form.
+#[derive(Copy, Clone)]
+pub(crate) struct GmcCommand(pub(crate) u32);
+
+impl GmcCommand {
+    fn name(self) -> &'static str {
+        match self.0 {
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_GSP_INIT => "GSP_INIT",
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER => {
+                "EXEC_GENERIC_BOOTLOADER"
+            }
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_EXEC_HS_BINARY => "EXEC_HS_BINARY",
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_GSP_SUSPEND => "GSP_SUSPEND",
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_GSP_RESUME_DONE => "GSP_RESUME_DONE",
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_ADD_VGPU_TYPE => "ADD_VGPU_TYPE",
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_QUERY_SUPPORTED_VGPU_TYPES => {
+                "QUERY_SUPPORTED_VGPU_TYPES"
+            }
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_QUERY_CREATABLE_VGPU_TYPES => {
+                "QUERY_CREATABLE_VGPU_TYPES"
+            }
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_ASSIGN_VGPU_TYPE => "ASSIGN_VGPU_TYPE",
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_DEASSIGN_VGPU_TYPE => "DEASSIGN_VGPU_TYPE",
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_QUERY_VGPU_PROPERTIES => "QUERY_VGPU_PROPERTIES",
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_QUERY_ASSIGNED_VF_VGPU_TYPE => {
+                "QUERY_ASSIGNED_VF_VGPU_TYPE"
+            }
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_BOOTLOAD_GSP_VGPU_PLUGIN_TASK => {
+                "BOOTLOAD_GSP_VGPU_PLUGIN_TASK"
+            }
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_SHUTDOWN_GSP_VGPU_PLUGIN_TASK => {
+                "SHUTDOWN_GSP_VGPU_PLUGIN_TASK"
+            }
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_SHUTDOWN_GSP_VGPU_PLUGIN_TASK_COMPLETE => {
+                "SHUTDOWN_GSP_VGPU_PLUGIN_TASK_COMPLETE"
+            }
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_CLEANUP_GSP_VGPU_PLUGIN_RESOURCES => {
+                "CLEANUP_GSP_VGPU_PLUGIN_RESOURCES"
+            }
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_VGPU_PLUGIN_TRIGGERED_EVENT => {
+                "VGPU_PLUGIN_TRIGGERED_EVENT"
+            }
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_VGPU_MGR_SCRUB_GUEST_FB => {
+                "VGPU_MGR_SCRUB_GUEST_FB"
+            }
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_VGPU_MGR_ALLOC_GSP_CEUTILS => {
+                "VGPU_MGR_ALLOC_GSP_CEUTILS"
+            }
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_VGPU_MGR_FREE_GSP_CEUTILS => {
+                "VGPU_MGR_FREE_GSP_CEUTILS"
+            }
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_SCHED_CONTROL => "SCHED_CONTROL",
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_MMU_FAULT_QUEUED => "MMU_FAULT_QUEUED",
+            bindings::GMCAPI_COMMANDS_GMCAPI_CMD_INVALID => "INVALID",
+            _ => "UNKNOWN",
+        }
+    }
+}
+
+impl fmt::Display for GmcCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} (0x{:x})", self.name(), self.0)
+    }
+}
 
 /// Header for an unencrypted GMC API message in the GSP command queue.
 ///
