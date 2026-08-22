@@ -712,6 +712,13 @@ pub(crate) struct GmcApiHeader {
 /// `GMCAPI_HEADER_COMMAND_ID_MASK`. The remaining byte carries flags.
 const GMCAPI_COMMAND_ID_MASK: u32 = 0x00ff_ffff;
 
+/// Response flag in the high byte of [`GmcApiHeader::command`].
+const GMCAPI_COMMAND_FLAGS_RESPONSE: u32 = 0x0100_0000;
+
+/// GSP-RM numbers the events it raises from this value up, so they cannot collide with the
+/// driver's request sequences, which start at zero.
+const GMC_EVENT_SEQUENCE_BASE: u64 = 1 << 63;
+
 /// GMC command that hands GSP-RM its system information and registry keys and returns the static
 /// GPU configuration.
 pub(crate) const GMCAPI_CMD_GSP_INIT: u32 = bindings::GMCAPI_COMMANDS_GMCAPI_CMD_GSP_INIT;
@@ -756,6 +763,16 @@ impl GmcApiHeader {
     /// Returns the command identifier, without the flag byte.
     pub(crate) fn command_id(&self) -> u32 {
         self.command & GMCAPI_COMMAND_ID_MASK
+    }
+
+    /// Returns `true` if this header is a reply to a driver request.
+    pub(crate) fn is_response(&self) -> bool {
+        self.command & GMCAPI_COMMAND_FLAGS_RESPONSE != 0
+    }
+
+    /// Returns [`Self::sequence`] with the GSP-initiated-event bit cleared.
+    pub(crate) fn sequence_number(&self) -> u64 {
+        self.sequence & !GMC_EVENT_SEQUENCE_BASE
     }
 }
 
