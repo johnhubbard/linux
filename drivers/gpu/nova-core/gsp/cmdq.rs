@@ -53,6 +53,7 @@ use crate::{
     driver::Bar0,
     gsp::{
         fw::{
+            GmcCommand,
             GspGmcMsgElement,
             GspMsgElement,
             MsgFunction,
@@ -871,9 +872,9 @@ impl CmdqInner {
 
         dev_dbg!(
             &self.dev,
-            "GSP GMC: send: seq# {}, command_id=0x{:x}, length=0x{:x}\n",
+            "GSP GMC: send: seq# {}, command={}, length=0x{:x}\n",
             rpc_seq,
-            command_id,
+            GmcCommand(command_id),
             dst.header.length(),
         );
 
@@ -1298,9 +1299,9 @@ impl CmdqInner {
 
             dev_dbg!(
                 &self.dev,
-                "GSP GMC: event: seq# {}, command_id=0x{:x}, length=0x{:x}\n",
+                "GSP GMC: event: seq# {}, command={}, length=0x{:x}\n",
                 header.gmc.sequence,
-                command_id,
+                GmcCommand(command_id),
                 length,
             );
 
