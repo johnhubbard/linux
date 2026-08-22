@@ -1299,11 +1299,17 @@ impl CmdqInner {
             (None, QueuePointers::Unchanged)
         } else {
             let command_id = header.gmc.command_id();
+            let kind = if header.gmc.is_response() {
+                "response"
+            } else {
+                "event"
+            };
 
             dev_dbg!(
                 &self.dev,
-                "GSP GMC: event: seq# {}, command={}, length=0x{:x}\n",
-                header.gmc.sequence,
+                "GSP GMC: {}: seq# {}, command={}, length=0x{:x}\n",
+                kind,
+                header.gmc.sequence_number(),
                 GmcCommand(command_id),
                 length,
             );
