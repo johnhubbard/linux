@@ -43,12 +43,63 @@ lengths, and values in the TLV.
     |         ...               |  More TLV blocks
     +---------------------------+
 
+Firmware Image Files
+====================
+
+nova-core loads one TLV file per firmware image. The basename names the
+image, and each image has its own section of tags below:
+
+``gsp.tlv``
+    The GSP-RM image, with the tags under `GSP Firmware Tags`_. Its payload
+    is in the companion file ``gsp.bin``.
+
+``gsp_bootloader.tlv``
+    The bootloader that loads GSP-RM, with the tags under
+    `GSP Bootloader Tags`_.
+
+``booter_load.tlv`` and ``booter_unload.tlv``
+    The SEC2 Booter images that load and unload GSP-RM on Turing, Ampere,
+    and Ada, with the tags under `Booter Firmware Tags`_.
+
+``gen_bootloader.tlv``
+    The bootloader that loads FWSEC on Turing and GA100, with the tags under
+    `Generic Bootloader Tags`_.
+
+``fmc.tlv``
+    The GSP-FMC image that FSP loads on Hopper and later, with the tags
+    under `FMC Firmware Tags`_.
+
+Every chip uses ``gsp.tlv`` and ``gsp_bootloader.tlv``. The other images
+depend on how the chip boots the GSP, and the ``MODULE_FIRMWARE`` entries
+list the complete set for each chip.
+
+A TLV either carries its payload in a ``BLOB`` tag or names a companion file
+with a ``FILE`` and ``SIZE`` pair, as described under `Common Tags`_. A
+companion file has the same basename as its TLV file and a ``.bin``
+extension. :doc:`firmware` states where the files are installed and how
+their names change across ABI epochs.
+
 Tags and Length
 ===============
 TLV tags are always four-character words, with all letters being upper case.
 Duplicate tags are not allowed.
 
 A TLV file may contain additional tags not described in this document.
+
+Tag Compatibility
+=================
+
+Once a tag has shipped in linux-firmware for a firmware type, its value type
+and meaning for that firmware type are fixed. To carry different data, add a
+new tag and document the old one as deprecated. A deprecated tag name is
+never reused.
+
+A parser ignores a tag it does not recognize, so adding a tag does not
+affect an older kernel. A newer kernel that requires the new tag must still
+work when the tag is absent, because firmware already published in the same
+ABI epoch lacks it. When the kernel cannot work without the tag, the tag
+needs a new epoch. Removing a tag that an existing kernel requires also
+needs a new epoch. :doc:`firmware` defines epochs.
 
 Values
 ======
