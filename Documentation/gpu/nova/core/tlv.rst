@@ -43,12 +43,54 @@ lengths, and values in the TLV.
     |         ...               |  More TLV blocks
     +---------------------------+
 
+Firmware image files
+====================
+
+nova-core uses one TLV metadata file for each firmware image. The defined
+basenames are:
+
+``gsp.tlv``
+    The GSP-RM image metadata.
+
+``gsp_bootloader.tlv``
+    The bootloader that loads GSP-RM.
+
+``booter_load.tlv`` and ``booter_unload.tlv``
+    The SEC2 Booter images used on Turing, Ampere, and Ada.
+
+``gen_bootloader.tlv``
+    The generic FWSEC bootloader used on Turing and GA100.
+
+``fmc.tlv``
+    The FMC image used on Hopper and later GPUs.
+
+The GSP HAL selects the boot images required for each chipset. The
+``MODULE_FIRMWARE`` entries declare the complete file set that the driver may
+request. A TLV file either carries its payload in a ``BLOB`` tag or names a
+companion file with a ``FILE`` and ``SIZE`` pair, as described under
+`Common Tags`_. An out-of-line payload uses the same basename with a ``.bin``
+extension, such as ``gsp.bin``.
+
 Tags and Length
 ===============
 TLV tags are always four-character words, with all letters being upper case.
 Duplicate tags are not allowed.
 
 A TLV file may contain additional tags not described in this document.
+
+Tag compatibility
+=================
+
+Once a tag appears in an image distributed through linux-firmware, the tag
+keeps the same value type and meaning within that firmware image type. A
+deprecated tag name cannot be reused, and the tag remains documented as
+deprecated. A common tag has the same meaning in every firmware image type.
+
+Parsers ignore tags they do not recognize. Adding an optional tag is
+compatible with older parsers. If the driver requires a new tag, it must
+provide a fallback for older firmware in the same ABI epoch or use a new
+epoch. Removing a tag required by an older driver also requires a new epoch.
+See :doc:`firmware` for the epoch compatibility rules.
 
 Values
 ======
