@@ -8,4 +8,5 @@
 //!
 //! See `Documentation/gpu/nova/core/interrupts.rst`.
 
+mod interrupt_tree;
 mod regs;
