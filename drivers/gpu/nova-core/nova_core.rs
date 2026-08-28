@@ -17,6 +17,8 @@ mod firmware;
 mod fsp;
 mod gpu;
 mod gsp;
+#[expect(dead_code)]
+mod irq;
 mod mctp;
 #[macro_use]
 mod num;
