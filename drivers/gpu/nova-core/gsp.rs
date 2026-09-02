@@ -152,7 +152,7 @@ pub(crate) struct Gsp<'gsp> {
     /// Log buffers, optionally exposed via debugfs.
     #[pin]
     logs: debugfs::Scope<LogBuffers<'gsp>>,
-    /// Command queue.
+    /// Command queue, borrowed by the GSP event interrupt handler.
     #[pin]
     pub(crate) cmdq: Cmdq<'gsp>,
     /// RM arguments.

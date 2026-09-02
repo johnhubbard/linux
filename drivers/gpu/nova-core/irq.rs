@@ -11,6 +11,7 @@
 
 #[cfg(CONFIG_NOVA_CORE_SELFTESTS)]
 pub(crate) mod doorbell_test;
+pub(crate) mod gsp;
 mod hal;
 mod interrupt_tree;
 mod regs;
@@ -25,11 +26,16 @@ use kernel::{
     prelude::*, //
 };
 
-use crate::num;
+use crate::{
+    driver::Bar0,
+    gpu::Chipset,
+    num, //
+};
 
 use interrupt_tree::{
     Subtree,
-    SubtreeSet, //
+    SubtreeSet,
+    Tree, //
 };
 
 /// The message-signaled interrupt type that Linux granted.
@@ -56,6 +62,39 @@ pub(crate) struct SubtreeVectors<'a> {
 }
 
 impl SubtreeVectors<'_> {
+    /// Returns the tree of `chipset`, covering the serviced subtrees.
+    ///
+    /// # Errors
+    ///
+    /// `EINVAL` if `chipset` does not implement every serviced subtree.
+    fn tree<'b>(&self, bar: Bar0<'b>, chipset: Chipset) -> Result<Tree<'b>> {
+        Tree::new(bar, chipset, self)
+    }
+
+    /// Disables every vector in the tree, clears every pending bit, and rearms PCI interrupt
+    /// delivery.
+    ///
+    /// On return, the serviced subtrees are enabled at `TOP` under a `TOP` rearm method and
+    /// disabled under the configuration-space one. A caller that needs delivery enables them
+    /// itself.
+    ///
+    /// Call this only during probe, with no interrupt handler registered.
+    ///
+    /// # Errors
+    ///
+    /// `EINVAL` if `chipset` does not implement every serviced subtree.
+    pub(crate) fn reset_tree(&self, bar: Bar0<'_>, chipset: Chipset) -> Result {
+        let tree = self.tree(bar, chipset)?;
+
+        tree.disable_all_leaves();
+        tree.drain();
+        for subtree in self.serviced.iter() {
+            tree.rearm_pci_irq(subtree);
+        }
+
+        Ok(())
+    }
+
     /// Returns the [`irq::IrqRequest`] for the PCI vector that delivers `subtree`.
     ///
     /// # Errors
