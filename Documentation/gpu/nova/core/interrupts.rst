@@ -574,9 +574,12 @@ function code says which it is.
   receive trace at debug level already records every message's arrival with
   its sequence number, function code, and length.
 
-The sequence number takes no part in the match, because the GSP does not echo
-the command's sequence number on every reply. On r570 the reply to
-``UnloadingGuestDriver`` carries sequence 0.
+A command's reply must carry the RPC sequence number that nova-core wrote into
+the command, as well as its function code. A message with the awaited function
+code and a different sequence number is a stale reply to a command that already
+timed out, so it is logged at warning level and dropped rather than classified
+as an event. An unsolicited event answers no command, so a caller awaiting one
+matches on the function code alone.
 
 The read pointer advances past every message, whether it matched, was an event,
 or matched but failed to decode, so a message is never left at the queue head
