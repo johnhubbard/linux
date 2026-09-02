@@ -1,17 +1,25 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use kernel::prelude::*;
+use kernel::{
+    io::{
+        Io,
+        Mmio, //
+    },
+    prelude::*, //
+};
 
 use crate::{
     falcon::{
         Falcon,
         FalconBromParams,
-        FalconEngine, //
+        FalconEngine,
+        PFalcon2Registers, //
     },
     gpu::{
         Architecture,
         Chipset, //
     },
+    regs,
 };
 
 mod ga102;
@@ -70,6 +78,74 @@ pub(crate) trait FalconHal<E: FalconEngine>: Send + Sync {
     /// these. For anything above, the PIO registers appear to be masked to the CPU, so DMA is the
     /// only usable method.
     fn load_method(&self) -> LoadMethod;
+}
+
+/// Offsets of a falcon's RISC-V interrupt routing registers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[expect(dead_code)]
+pub(crate) enum RiscvRouting {
+    /// The Turing offsets. GA100 uses them too.
+    Tu102,
+
+    /// The offsets from GA102 on.
+    Ga102,
+}
+
+impl RiscvRouting {
+    /// Returns the causes in `latched` that are routed to the host, meaning the CPU, rather than
+    /// to the falcon's own RISC-V core.
+    ///
+    /// The causes routed to the core belong to the firmware running on it, and the host does not
+    /// service them.
+    #[expect(dead_code)]
+    pub(crate) fn host_routed_causes(
+        self,
+        pfalcon2: Mmio<'_, PFalcon2Registers>,
+        latched: regs::NV_PFALCON_FALCON_IRQSTAT,
+    ) -> regs::NV_PFALCON_FALCON_IRQSTAT {
+        let (mask, dest) = match self {
+            Self::Tu102 => (
+                pfalcon2.read(regs::tu102::NV_PRISCV_RISCV_IRQMASK).value(),
+                pfalcon2.read(regs::tu102::NV_PRISCV_RISCV_IRQDEST).value(),
+            ),
+            Self::Ga102 => (
+                pfalcon2.read(regs::ga102::NV_PRISCV_RISCV_IRQMASK).value(),
+                pfalcon2.read(regs::ga102::NV_PRISCV_RISCV_IRQDEST).value(),
+            ),
+        };
+
+        regs::NV_PFALCON_FALCON_IRQSTAT::from(latched.into_raw() & mask & dest)
+    }
+}
+
+/// Interrupt properties of a falcon that differ by GPU family.
+///
+/// Separate from [`FalconHal`] because the GSP event handler calls these from hard interrupt
+/// context, where it cannot make the heap allocation that a `FalconHal` takes.
+#[expect(dead_code)]
+pub(crate) trait FalconIntrHal {
+    /// Returns whether these falcons implement `NV_PFALCON_FALCON_INTR_RETRIGGER`.
+    fn has_intr_retrigger(&self) -> bool;
+
+    /// Returns the offsets of `PRISCV_RISCV_IRQMASK` and `PRISCV_RISCV_IRQDEST`.
+    fn riscv_routing(&self) -> RiscvRouting;
+}
+
+/// Returns the [`FalconIntrHal`] for `chipset`.
+///
+/// GA100 has its own arm: it has the retrigger register, which Turing lacks, and the Turing
+/// routing offsets, which GA102 moved.
+#[expect(dead_code)]
+pub(crate) fn falcon_intr_hal(chipset: Chipset) -> &'static dyn FalconIntrHal {
+    match chipset.arch() {
+        Architecture::Turing => tu102::TU102_INTR_HAL,
+        Architecture::Ampere if chipset == Chipset::GA100 => tu102::GA100_INTR_HAL,
+        Architecture::Ampere
+        | Architecture::Ada
+        | Architecture::Hopper
+        | Architecture::BlackwellGB10x
+        | Architecture::BlackwellGB20x => ga102::GA102_INTR_HAL,
+    }
 }
 
 /// Returns a boxed falcon HAL adequate for `chipset`.

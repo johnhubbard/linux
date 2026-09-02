@@ -28,7 +28,11 @@ use crate::{
     regs,
 };
 
-use super::FalconHal;
+use super::{
+    FalconHal,
+    FalconIntrHal,
+    RiscvRouting, //
+};
 
 fn select_core_ga102(pfalcon2: Mmio<'_, PFalcon2Registers>) -> Result {
     let bcr_ctrl = pfalcon2.read(regs::NV_PRISCV_RISCV_BCR_CTRL);
@@ -170,3 +174,18 @@ impl<E: FalconEngine> FalconHal<E> for Ga102<E> {
         LoadMethod::Dma
     }
 }
+
+/// The falcon interrupt properties of GA102 and later.
+struct Ga102Intr;
+
+impl FalconIntrHal for Ga102Intr {
+    fn has_intr_retrigger(&self) -> bool {
+        true
+    }
+
+    fn riscv_routing(&self) -> RiscvRouting {
+        RiscvRouting::Ga102
+    }
+}
+
+pub(super) const GA102_INTR_HAL: &dyn FalconIntrHal = &Ga102Intr;
