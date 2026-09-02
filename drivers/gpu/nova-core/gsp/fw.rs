@@ -470,13 +470,14 @@ impl MsgHeaderVersion {
 }
 
 impl bindings::rpc_message_header_v {
-    fn init(cmd_size: usize, function: MsgFunction) -> impl Init<Self, Error> {
+    fn init(sequence: u32, cmd_size: usize, function: MsgFunction) -> impl Init<Self, Error> {
         type RpcMessageHeader = bindings::rpc_message_header_v;
 
         try_init!(RpcMessageHeader {
             header_version: MsgHeaderVersion::new().into(),
             signature: bindings::NV_VGPU_MSG_SIGNATURE_VALID,
             function: function.into(),
+            sequence,
             length: size_of::<Self>()
                 .checked_add(cmd_size)
                 .ok_or(EOVERFLOW)
@@ -503,8 +504,12 @@ static_assert!(
 
 impl GspMsgElement {
     /// Creates the queue element header and the RPC header of a command with a `cmd_size`-byte
-    /// payload.
-    pub(crate) fn init(cmd_size: usize, function: MsgFunction) -> impl Init<Self, Error> {
+    /// payload and the RPC sequence number `rpc_seq`.
+    pub(crate) fn init(
+        rpc_seq: u32,
+        cmd_size: usize,
+        function: MsgFunction,
+    ) -> impl Init<Self, Error> {
         type RpcMessageHeader = bindings::rpc_message_header_v;
 
         try_init!(GspMsgElement {
@@ -514,7 +519,7 @@ impl GspMsgElement {
                     .checked_add(cmd_size)
                     .ok_or(EOVERFLOW)?,
             )?,
-            rpc <- RpcMessageHeader::init(cmd_size, function),
+            rpc <- RpcMessageHeader::init(rpc_seq, cmd_size, function),
         })
     }
 
