@@ -178,6 +178,14 @@ impl SubtreeSet {
     pub(super) const fn span(self) -> u32 {
         u32::BITS - self.0.leading_zeros()
     }
+
+    /// Returns the subtrees of this set, lowest index first.
+    pub(super) fn iter(self) -> impl Iterator<Item = Subtree> {
+        // INVARIANT: a shift of `1` leaves exactly one bit set.
+        (0..u32::BITS)
+            .map(|index| Subtree(1 << index))
+            .filter(move |subtree| self.contains(*subtree))
+    }
 }
 
 impl From<Subtree> for SubtreeSet {

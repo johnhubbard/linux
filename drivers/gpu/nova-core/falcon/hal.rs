@@ -1,8 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use kernel::prelude::*;
+use kernel::{
+    io::{
+        register::WithBase,
+        Io, //
+    },
+    prelude::*, //
+};
 
 use crate::{
+    driver::Bar0,
     falcon::{
         Falcon,
         FalconBromParams,
@@ -12,6 +19,7 @@ use crate::{
         Architecture,
         Chipset, //
     },
+    regs,
 };
 
 mod ga102;
@@ -70,6 +78,45 @@ pub(crate) trait FalconHal<E: FalconEngine>: Send + Sync {
     /// these. For anything above, the PIO registers appear to be masked to the CPU, so DMA is the
     /// only usable method.
     fn load_method(&self) -> LoadMethod;
+}
+
+/// Returns whether `chipset`'s falcons implement `NV_PFALCON_FALCON_INTR_RETRIGGER`.
+///
+/// Turing falcons do not. Ampere and later do, including GA100, whose falcon otherwise uses the
+/// Turing HAL, so this is keyed on the architecture rather than provided through [`FalconHal`].
+pub(crate) fn has_intr_retrigger(chipset: Chipset) -> bool {
+    !matches!(chipset.arch(), Architecture::Turing)
+}
+
+/// Returns whether `chipset` carries the RISC-V interrupt routing registers at the Turing
+/// offsets.
+///
+/// GA102 moved `NV_PRISCV_RISCV_IRQMASK` and `NV_PRISCV_RISCV_IRQDEST`, and GA100 kept the Turing
+/// offsets, which is also why [`falcon_hal`] gives GA100 the Turing HAL.
+fn has_turing_riscv_routing(chipset: Chipset) -> bool {
+    matches!(chipset.arch(), Architecture::Turing) || chipset == Chipset::GA100
+}
+
+/// Returns the interrupt causes a RISC-V falcon on `chipset` routes to the host, in the layout of
+/// `NV_PFALCON_FALCON_IRQSTAT`.
+///
+/// A cause reaches the host only if the RISC-V core both enables it and directs it there, which
+/// `NV_PRISCV_RISCV_IRQMASK` and `NV_PRISCV_RISCV_IRQDEST` say. Every other latched cause belongs
+/// to the firmware running on the core.
+pub(crate) fn host_intr_routing<E: FalconEngine>(bar: Bar0<'_>, chipset: Chipset) -> u32 {
+    if has_turing_riscv_routing(chipset) {
+        bar.read(regs::tu102::NV_PRISCV_RISCV_IRQMASK::of::<E>())
+            .value()
+            & bar
+                .read(regs::tu102::NV_PRISCV_RISCV_IRQDEST::of::<E>())
+                .value()
+    } else {
+        bar.read(regs::ga102::NV_PRISCV_RISCV_IRQMASK::of::<E>())
+            .value()
+            & bar
+                .read(regs::ga102::NV_PRISCV_RISCV_IRQDEST::of::<E>())
+                .value()
+    }
 }
 
 /// Returns a boxed falcon HAL adequate for `chipset`.

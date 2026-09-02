@@ -29,7 +29,10 @@ use crate::{
         Gsp,
         GspBootContext, //
     },
-    irq::SubtreeVectors,
+    irq::{
+        gsp::GspIrq,
+        SubtreeVectors, //
+    },
     vgpu::VgpuManager, //
 };
 
@@ -282,6 +285,12 @@ struct GspResources<'gpu> {
 #[pin_data]
 pub(crate) struct Gpu<'gpu> {
     spec: Spec,
+    /// GSP event interrupt registration.
+    ///
+    /// Declared before `gsp_resources` so it is dropped first: `free_irq` runs, waiting out any
+    /// in-flight handler, before the queue it drains goes away and before the GSP is unloaded.
+    #[pin]
+    _gsp_irq: GspIrq<'gpu>,
     /// Static GPU information as provided by the GSP.
     gsp_static_info: GetGspStaticInfoReply,
     /// GSP and its resources.
@@ -337,7 +346,7 @@ impl<'gpu> Gpu<'gpu> {
         let dev = pdev.as_ref();
 
         try_pin_init!(Self {
-            vectors: crate::irq::alloc_vectors(pdev, crate::irq::SERVICED_SUBTREE.into())?,
+            vectors: crate::irq::alloc_vectors(pdev, crate::irq::gsp::GSP_SUBTREE.into())?,
 
             // SAFETY: `vectors` is initialized above, lives at a pinned stable address, and is
             // dropped after every field that uses `vectors_ref` (struct field drop order).
@@ -382,12 +391,7 @@ impl<'gpu> Gpu<'gpu> {
 
                 bar,
 
-                gsp_falcon: Falcon::new(
-                    dev,
-                    spec.chipset,
-                    bar
-                )
-                .inspect(|falcon| falcon.clear_swgen0_intr())?,
+                gsp_falcon: Falcon::new(dev, spec.chipset, bar)?,
 
                 sec2_falcon: Falcon::new(dev, spec.chipset, bar)?,
 
@@ -410,6 +414,33 @@ impl<'gpu> Gpu<'gpu> {
                     vgpu,
                 })?,
             }),
+
+            // Clear the interrupt state GSP boot left behind, before registering the handler
+            // below.
+            _: {
+                crate::irq::gsp::quiesce(bar, gsp_resources.spec.chipset, vectors_ref)?;
+            },
+
+            // Register the permanent GSP SWGEN0 handler, which enables the interrupt.
+            //
+            // SAFETY: the command queue lives in `gsp_resources`, which is initialized above and
+            // pinned. `_gsp_irq` is declared before `gsp_resources` and `vectors`, so it is
+            // dropped first, ensuring `free_irq` runs before either the queue or the vectors go
+            // away. The registration is stored in `Gpu` and never leaked.
+            _gsp_irq <- unsafe {
+                GspIrq::new(
+                    pdev,
+                    vectors_ref,
+                    bar,
+                    &*core::ptr::from_ref(&gsp_resources.gsp.cmdq),
+                    gsp_resources.spec.chipset,
+                )
+            },
+
+            // Drain the messages the GSP posted during boot, before relying on the interrupt.
+            _: {
+                gsp_resources.gsp.cmdq.drain()?;
+            },
 
             gsp_static_info: {
                 // Obtain and display basic GPU information.
