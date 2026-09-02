@@ -12,6 +12,7 @@ use crate::{
         Architecture,
         Chipset, //
     },
+    regs,
 };
 
 mod ga102;
@@ -70,6 +71,24 @@ pub(crate) trait FalconHal<E: FalconEngine>: Send + Sync {
     /// these. For anything above, the PIO registers appear to be masked to the CPU, so DMA is the
     /// only usable method.
     fn load_method(&self) -> LoadMethod;
+
+    /// Returns the causes in `latched` that are routed to the host, meaning the CPU, rather than
+    /// to the falcon's own RISC-V core.
+    ///
+    /// The causes routed to the core belong to the firmware running on it, and the host does not
+    /// service them.
+    #[expect(dead_code)]
+    fn host_routed_causes(
+        &self,
+        falcon: &Falcon<'_, E>,
+        latched: regs::NV_PFALCON_FALCON_IRQSTAT,
+    ) -> regs::NV_PFALCON_FALCON_IRQSTAT;
+
+    /// Retriggers the falcon, which then re-emits its host-routed causes into the interrupt tree.
+    ///
+    /// Turing falcons have no retrigger register, so on Turing this does nothing.
+    #[expect(dead_code)]
+    fn retrigger(&self, falcon: &Falcon<'_, E>);
 }
 
 /// Returns a boxed falcon HAL adequate for `chipset`.
@@ -86,7 +105,7 @@ pub(super) fn falcon_hal<E: FalconEngine + 'static>(
         }
         // GA100 boots like Turing so use Turing HAL
         Architecture::Ampere if chipset == Chipset::GA100 => {
-            KBox::new(tu102::Tu102::<E>::new(), GFP_KERNEL)? as KBox<dyn FalconHal<E>>
+            KBox::new(tu102::Tu102::<E>::ga100(), GFP_KERNEL)? as KBox<dyn FalconHal<E>>
         }
         Architecture::Ampere
         | Architecture::Ada
