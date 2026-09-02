@@ -38,6 +38,11 @@ use crate::{
         Gsp,
         GspBootContext, //
     },
+    irq::{
+        self,
+        gsp::GspIrq,
+        SubtreeVectors, //
+    },
     mm::{
         bar_user::BarUser,
         pagetable::MmuVersion,
@@ -301,6 +306,13 @@ struct GspResources<'gpu> {
 #[pin_data]
 pub(crate) struct Gpu<'gpu> {
     spec: Spec,
+    /// GSP event interrupt registration.
+    ///
+    /// Must be kept declared *before* `gsp_resources`, so that the handler is unregistered, and
+    /// any in-flight run of it has finished, before the command queue it drains is freed and
+    /// before the GSP is unloaded.
+    #[pin]
+    _gsp_irq: GspIrq<'gpu>,
     /// Static GPU information as provided by the GSP.
     gsp_static_info: GetGspStaticInfoReply,
     /// GPU memory manager owning memory management resources.
@@ -319,6 +331,14 @@ pub(crate) struct Gpu<'gpu> {
     /// Must be kept declared *after* `gsp_resources`, as the latter's `PinnedDrop` implementation
     /// requires the sysmem flush page to be in place.
     sysmem_flush: SysmemFlush<'gpu>,
+    /// Borrow of `vectors` that `_gsp_irq` holds. A field that borrows a sibling field is
+    /// self-referential, which `pin_init` cannot express, so the borrow is taken by hand.
+    vectors_ref: &'gpu SubtreeVectors<'gpu>,
+    /// PCI interrupt vector allocation.
+    ///
+    /// Must be kept declared *after* `_gsp_irq`, which holds a borrow of it.
+    #[pin]
+    vectors: SubtreeVectors<'gpu>,
 }
 
 #[pinned_drop]
@@ -358,6 +378,12 @@ impl<'gpu> Gpu<'gpu> {
         let dev = pdev.as_ref();
 
         try_pin_init!(Self {
+            vectors: irq::alloc_vectors(pdev, irq::gsp::GSP_SUBTREE.into())?,
+
+            // SAFETY: `vectors` is initialized above, is pinned at a stable address, and is
+            // dropped after every field that uses `vectors_ref` (struct field drop order).
+            vectors_ref: unsafe { &*core::ptr::from_ref(vectors.as_ref().get_ref()) },
+
             spec: Spec::new(dev, bar).inspect(|spec| {
                 dev_info!(dev,"NVIDIA ({})\n", spec);
             })?,
@@ -380,12 +406,7 @@ impl<'gpu> Gpu<'gpu> {
 
                 bar,
 
-                gsp_falcon: Falcon::new(
-                    dev,
-                    spec.chipset,
-                    bar
-                )
-                .inspect(|falcon| falcon.clear_swgen0_intr())?,
+                gsp_falcon: Falcon::new(dev, spec.chipset, bar)?,
 
                 sec2_falcon: Falcon::new(dev, spec.chipset, bar)?,
 
@@ -408,6 +429,30 @@ impl<'gpu> Gpu<'gpu> {
                     vgpu,
                 })?,
             }),
+
+            _: {
+                irq::gsp::quiesce(bar, gsp_resources.spec.chipset, vectors_ref)?;
+            },
+
+            // SAFETY: the command queue is a field of `gsp_resources`, which is initialized
+            // above and pinned, so the reference outlives the registration. The registration is
+            // a field of `Gpu` and is never leaked, so its `Drop` runs, and field drop order
+            // runs it before the queue is freed.
+            _gsp_irq <- unsafe {
+                GspIrq::new(
+                    pdev,
+                    vectors_ref,
+                    bar,
+                    &*core::ptr::from_ref(&gsp_resources.gsp.cmdq),
+                    gsp_resources.spec.chipset,
+                )
+            },
+
+            // No interrupt announces the messages that the GSP posted during boot, before the
+            // SWGEN0 latch was cleared.
+            _: {
+                gsp_resources.gsp.cmdq.drain()?;
+            },
 
             gsp_static_info: {
                 // Obtain and display basic GPU information.

@@ -643,7 +643,6 @@ impl<'cmdq> Cmdq<'cmdq> {
     /// # Errors
     ///
     /// `EIO` if the queue is poisoned, or if a message fails framing or checksum validation.
-    #[expect(dead_code)]
     pub(crate) fn drain(&self) -> Result {
         self.inner.lock().drain()
     }
