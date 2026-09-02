@@ -120,6 +120,14 @@ register! {
         4:4     halt => bool;
     }
 
+    /// Interrupt causes latched at the falcon, one bit per cause.
+    ///
+    /// A cause appears here whoever it is routed to, so a handler on the host side has to
+    /// intersect it with the routing registers to get the causes routed to the host.
+    pub(crate) NV_PFALCON_FALCON_IRQSTAT(u32) @ PFalconBase + 0x00000008 {
+        6:6     swgen0 => bool;
+    }
+
     pub(crate) NV_PFALCON_FALCON_MAILBOX0(u32) @ PFalconBase + 0x00000040 {
         31:0    value => u32;
     }
@@ -245,6 +253,18 @@ register! {
     /// falcon instance.
     pub(crate) NV_PFALCON_FALCON_ENGINE(u32) @ PFalconBase + 0x000003c0 {
         0:0     reset => bool;
+    }
+
+    /// Re-emits the falcon's latched interrupt causes into the interrupt tree.
+    ///
+    /// Write-only. A falcon signals the tree on a transition of the causes routed to the host, so
+    /// a handler that cleared the tree leaf while a cause was still latched has left no
+    /// transition behind, and this write supplies one. Turing falcons do not implement this
+    /// register.
+    ///
+    /// Open RM declares two elements and uses only the first.
+    pub(crate) NV_PFALCON_FALCON_INTR_RETRIGGER(u32)[2] @ PFalconBase + 0x000003e8 {
+        0:0     trigger => bool;
     }
 
     pub(crate) NV_PFALCON_FBIF_TRANSCFG(u32)[8] @ PFalconBase + 0x00000600 {
@@ -395,6 +415,29 @@ pub(crate) mod gm107 {
     }
 }
 
+pub(crate) mod tu102 {
+    use kernel::io::register;
+
+    use crate::falcon::PFalcon2Base;
+
+    // PRISCV
+    //
+    // The two registers below select which of a RISC-V falcon's interrupt causes reach the host,
+    // in the layout of `NV_PFALCON_FALCON_IRQSTAT`. GA100 uses these offsets as well.
+
+    register! {
+        /// Causes the RISC-V core enables. Read-only to the host.
+        pub(crate) NV_PRISCV_RISCV_IRQMASK(u32) @ PFalcon2Base + 0x000002b4 {
+            31:0    value => u32;
+        }
+
+        /// Causes routed to the host rather than to the RISC-V core itself.
+        pub(crate) NV_PRISCV_RISCV_IRQDEST(u32) @ PFalcon2Base + 0x000002b8 {
+            31:0    value => u32;
+        }
+    }
+}
+
 pub(crate) mod ga100 {
     use kernel::io::register;
 
@@ -403,6 +446,29 @@ pub(crate) mod ga100 {
     register! {
         pub(crate) NV_FUSE_STATUS_OPT_DISPLAY(u32) @ 0x00820c04 {
             0:0     display_disabled => bool;
+        }
+    }
+}
+
+pub(crate) mod ga102 {
+    use kernel::io::register;
+
+    use crate::falcon::PFalcon2Base;
+
+    // PRISCV
+    //
+    // GA102 moved the two routing registers. GA100 kept the Turing offsets, so this pair covers
+    // GA102 and later rather than the whole Ampere architecture.
+
+    register! {
+        /// Causes the RISC-V core enables. Read-only to the host.
+        pub(crate) NV_PRISCV_RISCV_IRQMASK(u32) @ PFalcon2Base + 0x00000528 {
+            31:0    value => u32;
+        }
+
+        /// Causes routed to the host rather than to the RISC-V core itself.
+        pub(crate) NV_PRISCV_RISCV_IRQDEST(u32) @ PFalcon2Base + 0x0000052c {
+            31:0    value => u32;
         }
     }
 }
