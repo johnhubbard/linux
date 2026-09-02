@@ -31,6 +31,7 @@ use crate::{
     },
     irq::{
         self,
+        gsp::GspIrq,
         SubtreeVectors, //
     },
     vgpu::VgpuManager, //
@@ -285,6 +286,12 @@ struct GspResources<'gpu> {
 #[pin_data]
 pub(crate) struct Gpu<'gpu> {
     spec: Spec,
+    /// GSP event interrupt registration.
+    ///
+    /// Declared before `gsp_resources` so it is dropped first: `free_irq` runs, waiting out any
+    /// in-flight handler, before the queue it drains goes away and before the GSP is unloaded.
+    #[pin]
+    _gsp_irq: GspIrq<'gpu>,
     /// Static GPU information as provided by the GSP.
     gsp_static_info: GetGspStaticInfoReply,
     /// GSP and its resources.
@@ -340,7 +347,7 @@ impl<'gpu> Gpu<'gpu> {
         let dev = pdev.as_ref();
 
         try_pin_init!(Self {
-            vectors: irq::alloc_vectors(pdev, irq::SERVICED_SUBTREE.into())?,
+            vectors: irq::alloc_vectors(pdev, irq::gsp::GSP_SUBTREE.into())?,
 
             // SAFETY: `vectors` is initialized above, is pinned at a stable address, and is
             // dropped after every field that uses `vectors_ref` (struct field drop order).
@@ -384,12 +391,7 @@ impl<'gpu> Gpu<'gpu> {
 
                 bar,
 
-                gsp_falcon: Falcon::new(
-                    dev,
-                    spec.chipset,
-                    bar
-                )
-                .inspect(|falcon| falcon.clear_swgen0_intr())?,
+                gsp_falcon: Falcon::new(dev, spec.chipset, bar)?,
 
                 sec2_falcon: Falcon::new(dev, spec.chipset, bar)?,
 
@@ -412,6 +414,30 @@ impl<'gpu> Gpu<'gpu> {
                     vgpu,
                 })?,
             }),
+
+            // GSP boot left the SWGEN0 latch set and pending bits in the tree.
+            _: {
+                irq::gsp::quiesce(bar, gsp_resources.spec.chipset, vectors_ref)?;
+            },
+
+            // SAFETY: the command queue is a field of `gsp_resources`, which is initialized above
+            // and pinned. `_gsp_irq` is declared before `gsp_resources` and `vectors`, so it is
+            // dropped first and `free_irq` runs before either the queue or the vectors go away.
+            // The registration is stored in `Gpu` and never leaked.
+            _gsp_irq <- unsafe {
+                GspIrq::new(
+                    pdev,
+                    vectors_ref,
+                    bar,
+                    &*core::ptr::from_ref(&gsp_resources.gsp.cmdq),
+                    gsp_resources.spec.chipset,
+                )
+            },
+
+            // Drain the messages the GSP posted during boot, before relying on the interrupt.
+            _: {
+                gsp_resources.gsp.cmdq.drain()?;
+            },
 
             gsp_static_info: {
                 // Obtain and display basic GPU information.

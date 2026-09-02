@@ -1,8 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use kernel::prelude::*;
+use kernel::{
+    io::{
+        register::WithBase,
+        Io, //
+    },
+    prelude::*, //
+};
 
 use crate::{
+    driver::Bar0,
     falcon::{
         Falcon,
         FalconBromParams,
@@ -12,6 +19,7 @@ use crate::{
         Architecture,
         Chipset, //
     },
+    regs,
 };
 
 mod ga102;
@@ -70,6 +78,44 @@ pub(crate) trait FalconHal<E: FalconEngine>: Send + Sync {
     /// these. For anything above, the PIO registers appear to be masked to the CPU, so DMA is the
     /// only usable method.
     fn load_method(&self) -> LoadMethod;
+}
+
+/// Returns whether `chipset`'s falcons implement `NV_PFALCON_FALCON_INTR_RETRIGGER`.
+///
+/// GA100 implements it and otherwise uses the Turing falcon HAL, so this is keyed on the
+/// architecture rather than provided through [`FalconHal`].
+pub(crate) fn has_intr_retrigger(chipset: Chipset) -> bool {
+    !matches!(chipset.arch(), Architecture::Turing)
+}
+
+/// Returns whether `chipset` reaches `NV_PRISCV_RISCV_IRQMASK` and `NV_PRISCV_RISCV_IRQDEST` at
+/// the Turing offsets rather than the GA102 ones.
+fn has_turing_riscv_routing(chipset: Chipset) -> bool {
+    matches!(chipset.arch(), Architecture::Turing) || chipset == Chipset::GA100
+}
+
+/// Returns the causes in `latched` that a RISC-V falcon on `chipset` routes to the host.
+///
+/// A cause reaches the host only if the core both enables it and directs it there. Every other
+/// latched cause belongs to the firmware running on the core.
+pub(crate) fn host_routed_causes<E: FalconEngine>(
+    bar: Bar0<'_>,
+    chipset: Chipset,
+    latched: regs::NV_PFALCON_FALCON_IRQSTAT,
+) -> regs::NV_PFALCON_FALCON_IRQSTAT {
+    let routing = if has_turing_riscv_routing(chipset) {
+        let mask = bar.read(regs::tu102::NV_PRISCV_RISCV_IRQMASK::of::<E>());
+        let dest = bar.read(regs::tu102::NV_PRISCV_RISCV_IRQDEST::of::<E>());
+
+        mask.value() & dest.value()
+    } else {
+        let mask = bar.read(regs::ga102::NV_PRISCV_RISCV_IRQMASK::of::<E>());
+        let dest = bar.read(regs::ga102::NV_PRISCV_RISCV_IRQDEST::of::<E>());
+
+        mask.value() & dest.value()
+    };
+
+    regs::NV_PFALCON_FALCON_IRQSTAT::from(latched.into_raw() & routing)
 }
 
 /// Returns a boxed falcon HAL adequate for `chipset`.

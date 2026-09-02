@@ -10,6 +10,7 @@
 
 #[cfg(CONFIG_NOVA_CORE_IRQ_SELFTEST)]
 pub(crate) mod doorbell_test;
+pub(crate) mod gsp;
 mod hal;
 mod interrupt_tree;
 mod regs;
@@ -24,19 +25,17 @@ use kernel::{
     prelude::*, //
 };
 
-use crate::num;
-
-use interrupt_tree::{
-    GinVector,
-    Subtree,
-    SubtreeSet, //
+use crate::{
+    driver::Bar0,
+    gpu::Chipset,
+    num, //
 };
 
-/// The subtree nova-core allocates PCI vectors for.
-///
-/// Every source nova-core services latches in this one subtree, so a single allocation covers all
-/// of them.
-pub(crate) const SERVICED_SUBTREE: Subtree = GinVector::new::<129>().subtree();
+use interrupt_tree::{
+    Subtree,
+    SubtreeSet,
+    Tree, //
+};
 
 /// The message-signaled interrupt type a vector allocation obtained.
 ///
@@ -65,8 +64,41 @@ pub(crate) struct SubtreeVectors<'a> {
 
 impl SubtreeVectors<'_> {
     /// Returns the interrupt type these vectors were allocated as.
+    #[cfg_attr(not(CONFIG_NOVA_CORE_IRQ_SELFTEST), expect(dead_code))]
     pub(crate) fn msi_type(&self) -> MsiType {
         self.msi_type
+    }
+
+    /// Returns the interrupt tree these vectors deliver, as `chipset` implements it.
+    ///
+    /// # Errors
+    ///
+    /// `EINVAL` if this architecture does not implement a subtree these vectors service.
+    fn tree<'b>(&self, bar: Bar0<'b>, chipset: Chipset) -> Result<Tree<'b>> {
+        Tree::new(bar, chipset, self.msi_type, self.serviced)
+    }
+
+    /// Resets the interrupt tree these vectors deliver.
+    ///
+    /// Clears every leaf enable and every pending bit, then rearms PCI interrupt delivery. No
+    /// vector is enabled at its leaf on return, so the tree delivers nothing. Whether the
+    /// serviced subtrees are left enabled at `TOP` depends on the rearm method.
+    ///
+    /// Call this only during probe. It must not run concurrently with an interrupt handler.
+    ///
+    /// # Errors
+    ///
+    /// `EINVAL` if this architecture does not implement a subtree these vectors service.
+    pub(crate) fn reset_tree(&self, bar: Bar0<'_>, chipset: Chipset) -> Result {
+        let tree = self.tree(bar, chipset)?;
+
+        tree.disable_all_leaves();
+        tree.drain();
+        for subtree in self.serviced.iter() {
+            tree.rearm_pci_irq(subtree);
+        }
+
+        Ok(())
     }
 
     /// Returns an [`irq::IrqRequest`] for the vector that delivers `subtree`.

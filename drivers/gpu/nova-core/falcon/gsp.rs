@@ -14,12 +14,15 @@ use kernel::{
 };
 
 use crate::{
+    driver::Bar0,
     falcon::{
+        hal,
         Falcon,
         FalconEngine,
         PFalcon2Base,
         PFalconBase, //
     },
+    gpu::Chipset,
     regs,
 };
 
@@ -36,16 +39,79 @@ impl RegisterBase<PFalcon2Base> for Gsp {
 
 impl FalconEngine for Gsp {}
 
-impl<'a> Falcon<'a, Gsp> {
-    /// Clears the SWGEN0 bit in the Falcon's IRQ status clear register to
-    /// allow GSP to signal CPU for processing new messages in message queue.
-    pub(crate) fn clear_swgen0_intr(&self) {
-        self.bar.write(
-            WithBase::of::<Gsp>(),
+impl Gsp {
+    /// Clears the GSP falcon SWGEN0 interrupt latch.
+    ///
+    /// The GSP signals the interrupt tree no further while the latch stays set, so a caller that
+    /// consumed a notification without the interrupt handler must clear it.
+    pub(crate) fn clear_swgen0_intr(bar: Bar0<'_>) {
+        bar.write(
+            WithBase::of::<Self>(),
             regs::NV_PFALCON_FALCON_IRQSCLR::zeroed().with_swgen0(true),
         );
     }
 
+    /// Reads the GSP falcon interrupt causes pending for the host, without clearing any latch.
+    ///
+    /// Causes the falcon routes to its own RISC-V core belong to the firmware and are excluded,
+    /// so every cause here other than SWGEN0 is a GSP fault.
+    pub(crate) fn read_host_intr(
+        bar: Bar0<'_>,
+        chipset: Chipset,
+    ) -> regs::NV_PFALCON_FALCON_IRQSTAT {
+        let latched = bar.read(regs::NV_PFALCON_FALCON_IRQSTAT::of::<Self>());
+
+        hal::host_routed_causes::<Self>(bar, chipset, latched)
+    }
+
+    /// Reads the GSP falcon interrupt causes pending for the host, clearing the SWGEN0 latch if
+    /// it was set.
+    ///
+    /// Returns the causes as they were read, before the clear, and changes no other latch.
+    /// [`Self::read_host_intr`] is the same read without the clear.
+    pub(crate) fn take_host_intr(
+        bar: Bar0<'_>,
+        chipset: Chipset,
+    ) -> regs::NV_PFALCON_FALCON_IRQSTAT {
+        let status = Self::read_host_intr(bar, chipset);
+
+        if status.swgen0() {
+            Self::clear_swgen0_intr(bar);
+        }
+
+        status
+    }
+
+    /// Clears the latch of every interrupt cause set in `status`.
+    ///
+    /// A cause driven from outside the falcon stays set. [`Self::read_host_intr`] reports which
+    /// causes are still set after the write.
+    pub(crate) fn clear_intr(bar: Bar0<'_>, status: regs::NV_PFALCON_FALCON_IRQSTAT) {
+        bar.write(
+            WithBase::of::<Self>(),
+            regs::NV_PFALCON_FALCON_IRQSCLR::from(status.into_raw()),
+        );
+    }
+
+    /// Re-emits the falcon's host-routed interrupt causes into the interrupt tree.
+    ///
+    /// The caller must have cleared every host cause first. A cause still set is re-emitted at
+    /// once, and its vector arrives again as soon as the caller rearms delivery.
+    ///
+    /// Does nothing on Turing, whose falcons do not implement the register.
+    pub(crate) fn retrigger_intr(bar: Bar0<'_>, chipset: Chipset) {
+        if !hal::has_intr_retrigger(chipset) {
+            return;
+        }
+
+        bar.write(
+            WithBase::of::<Self>().at(0),
+            regs::NV_PFALCON_FALCON_INTR_RETRIGGER::zeroed().with_trigger(true),
+        );
+    }
+}
+
+impl<'a> Falcon<'a, Gsp> {
     /// Checks if GSP reload/resume has completed during the boot process.
     pub(crate) fn check_reload_completed(&self, timeout: Delta) -> Result<bool> {
         read_poll_timeout(
