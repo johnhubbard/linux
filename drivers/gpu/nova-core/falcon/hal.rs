@@ -77,7 +77,6 @@ pub(crate) trait FalconHal<E: FalconEngine>: Send + Sync {
     ///
     /// The causes routed to the core belong to the firmware running on it, and the host does not
     /// service them.
-    #[expect(dead_code)]
     fn host_routed_causes(
         &self,
         falcon: &Falcon<'_, E>,
@@ -87,7 +86,6 @@ pub(crate) trait FalconHal<E: FalconEngine>: Send + Sync {
     /// Retriggers the falcon, which then re-emits its host-routed causes into the interrupt tree.
     ///
     /// Turing falcons have no retrigger register, so on Turing this does nothing.
-    #[expect(dead_code)]
     fn retrigger(&self, falcon: &Falcon<'_, E>);
 }
 

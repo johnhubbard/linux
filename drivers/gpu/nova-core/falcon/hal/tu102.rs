@@ -28,7 +28,6 @@ use super::FalconHal;
 /// retrigger register.
 pub(super) struct Tu102<E: FalconEngine> {
     /// If `true`, the falcons have `NV_PFALCON_FALCON_INTR_RETRIGGER`.
-    #[expect(dead_code)]
     has_intr_retrigger: bool,
     _engine: PhantomData<E>,
 }
@@ -52,7 +51,6 @@ impl<E: FalconEngine> Tu102<E> {
 }
 
 /// Writes `NV_PFALCON_FALCON_INTR_RETRIGGER`.
-#[expect(dead_code)]
 pub(super) fn retrigger_ga100<E: FalconEngine>(falcon: &Falcon<'_, E>) {
     falcon.pfalcon.write(
         Array::at(0),
