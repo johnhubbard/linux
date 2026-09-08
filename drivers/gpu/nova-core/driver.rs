@@ -24,7 +24,11 @@ use kernel::{
 
 use crate::{
     api::NovaCoreApi,
-    gpu::Gpu, //
+    gpu::{
+        self,
+        Gpu,
+        Spec, //
+    }, //
 };
 
 /// Counter for generating unique auxiliary device IDs.
@@ -111,6 +115,14 @@ impl pci::Driver for NovaCoreDriver {
             bar1: {
                 let bar1_idx = bar1_resource_index(pdev)?;
                 pdev.iomap_region(bar1_idx, c"nova-core/bar1")?
+            },
+
+            _: {
+                let spec = Spec::new(pdev.as_ref(), bar)?;
+
+                // We must wait for GFW_BOOT completion before doing any significant setup on
+                // the GPU.
+                gpu::wait_gfw_boot_completion(pdev.as_ref(), bar, spec.chipset)?;
             },
 
             // TODO: Use self-referential pin-init syntax once available.
