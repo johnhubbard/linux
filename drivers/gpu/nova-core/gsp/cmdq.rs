@@ -632,6 +632,21 @@ impl<'cmdq> Cmdq<'cmdq> {
     {
         self.inner.lock().await_msg()
     }
+
+    /// Logs and consumes every message the GSP has already posted, and returns without waiting for
+    /// more.
+    ///
+    /// No caller is waiting for a reply while this holds the queue mutex, so every message is
+    /// logged as an event. See "Draining the GSP-to-CPU queue" in
+    /// `Documentation/gpu/nova/core/interrupts.rst`.
+    ///
+    /// # Errors
+    ///
+    /// `EIO` if the queue is poisoned, or if a message fails framing or checksum validation.
+    #[expect(dead_code)]
+    pub(crate) fn drain(&self) -> Result {
+        self.inner.lock().drain()
+    }
 }
 
 /// Inner mutex protected state of [`Cmdq`].
@@ -972,5 +987,31 @@ impl CmdqInner<'_> {
                 );
             }
         }
+    }
+
+    /// Logs and consumes every message the queue holds.
+    ///
+    /// # Errors
+    ///
+    /// `EIO` if the queue is poisoned, a message fails framing or checksum validation, or a
+    /// message's page count overflows a `u32`.
+    fn drain(&mut self) -> Result {
+        while !self.gsp_mem.driver_read_area().0.is_empty() {
+            // A message is available, so this returns without waiting.
+            let msg = self.wait_for_msg(Delta::ZERO)?;
+
+            let pages =
+                u32::try_from(msg.header.length().div_ceil(GSP_PAGE_SIZE)).map_err(|_| {
+                    dev_err!(&self.dev, "GSP drain: message length overflow\n");
+                    EIO
+                })?;
+            let function = msg.header.function();
+            let seq = msg.header.sequence();
+
+            self.gsp_mem.advance_cpu_read_ptr(pages);
+            self.log_event(function, seq);
+        }
+
+        Ok(())
     }
 }
