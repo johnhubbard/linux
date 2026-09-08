@@ -212,12 +212,12 @@ impl fmt::Display for Revision {
 /// Structure holding a basic description of the GPU: `Chipset` and `Revision`.
 #[derive(Clone, Copy)]
 pub(crate) struct Spec {
-    chipset: Chipset,
+    pub(crate) chipset: Chipset,
     revision: Revision,
 }
 
 impl Spec {
-    fn new(dev: &device::Device, bar: Bar0<'_>) -> Result<Spec> {
+    pub(crate) fn new(dev: &device::Device, bar: Bar0<'_>) -> Result<Spec> {
         // Some brief notes about boot0 and boot42, in chronological order:
         //
         // NV04 through NV50:
@@ -362,10 +362,8 @@ impl<'gpu> Gpu<'gpu> {
                 dev_info!(dev,"NVIDIA ({})\n", spec);
             })?,
 
-            // We must wait for GFW_BOOT completion before doing any significant setup on the GPU.
             _: {
-                let hal = hal::gpu_hal(spec.chipset);
-                let dma_mask = hal.dma_mask();
+                let dma_mask = hal::gpu_hal(spec.chipset).dma_mask();
 
                 // SAFETY: `Gpu` owns all DMA allocations for this device, and we are
                 // still constructing it, so no concurrent DMA allocations can exist.
@@ -377,9 +375,6 @@ impl<'gpu> Gpu<'gpu> {
                 // SAFETY: `Gpu` owns all DMA allocations for this device, and we are
                 // still constructing it, so no concurrent DMA allocations can exist.
                 unsafe { pdev.dma_set_max_seg_size(u32::MAX) };
-
-                hal.wait_gfw_boot_completion(bar)
-                    .inspect_err(|_| dev_err!(dev, "GFW boot did not complete\n"))?;
             },
 
             // Initialize this early because `gsp_resources` depends on it.
@@ -500,6 +495,23 @@ impl<'gpu> Gpu<'gpu> {
             dev_err!(dev, "self-tests failed: {:?}\n", err);
         }
     }
+}
+
+/// Waits for GFW, the GPU's boot firmware, to report completion.
+///
+/// The driver must not program the GPU before then.
+///
+/// # Errors
+///
+/// `ETIMEDOUT` if GFW does not report completion in time.
+pub(crate) fn wait_gfw_boot_completion(
+    dev: &device::Device<device::Bound>,
+    bar: Bar0<'_>,
+    chipset: Chipset,
+) -> Result {
+    hal::gpu_hal(chipset)
+        .wait_gfw_boot_completion(bar)
+        .inspect_err(|_| dev_err!(dev, "GFW boot did not complete\n"))
 }
 
 /// Reads the boot0 register and returns its raw value.
