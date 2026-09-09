@@ -642,8 +642,8 @@ impl<'cmdq> Cmdq<'cmdq> {
         self.inner.lock().send_command(command).map(|_| ())
     }
 
-    /// Waits for the response to the GMC request with command id `command_id`, and passes every
-    /// other GMC element that arrives first to `on_other`.
+    /// Waits for the response to the GMC request with command id `command_id` and RPC sequence
+    /// number `sequence`, and passes every other GMC element that arrives first to `on_other`.
     ///
     /// This method may sleep while waiting. The queue mutex stays locked across the whole wait and
     /// across the `on_other` and `decode` calls, so neither may call back into this [`Cmdq`].
@@ -652,15 +652,18 @@ impl<'cmdq> Cmdq<'cmdq> {
     pub(crate) fn await_gmc_response<R>(
         &self,
         command_id: u32,
+        sequence: u32,
         on_other: impl FnMut(&GspGmcMsgElement, &[u8], &[u8]) -> Result,
         decode: impl FnMut(&[u8], &[u8]) -> Result<R>,
     ) -> Result<R> {
         self.inner
             .lock()
-            .await_gmc_response(command_id, on_other, decode)
+            .await_gmc_response(command_id, sequence, on_other, decode)
     }
 
     /// Sends a GMC API request to the GSP without waiting for the response.
+    ///
+    /// Returns the RPC sequence number that the request carries.
     ///
     /// # Errors
     ///
@@ -670,10 +673,22 @@ impl<'cmdq> Cmdq<'cmdq> {
         command_id: u32,
         payload: &[u8],
         max_response_size: u32,
-    ) -> Result {
+    ) -> Result<u32> {
         self.inner
             .lock()
             .send_gmc(command_id, payload, max_response_size)
+    }
+
+    /// Sends a GMC API request that GSP-RM does not answer.
+    ///
+    /// # Errors
+    ///
+    /// Errors from [`DmaGspMem::allocate_command`] are propagated as-is.
+    pub(crate) fn send_gmc_no_reply(&self, command_id: u32, payload: &[u8]) -> Result {
+        self.inner
+            .lock()
+            .send_gmc(command_id, payload, 0)
+            .map(|_| ())
     }
 
     /// Waits for an unsolicited GSP event of type `M`. Events that arrive before it are logged and
@@ -844,10 +859,12 @@ impl CmdqInner<'_> {
     /// response that the caller accepts. The request carries the next RPC sequence number, which
     /// GSP-RM copies into its response. The number is consumed even if the send fails.
     ///
+    /// Returns the RPC sequence number that the request carries.
+    ///
     /// # Errors
     ///
     /// Errors from [`DmaGspMem::allocate_command`] are propagated as-is.
-    fn send_gmc(&mut self, command_id: u32, payload: &[u8], max_response_size: u32) -> Result {
+    fn send_gmc(&mut self, command_id: u32, payload: &[u8], max_response_size: u32) -> Result<u32> {
         let rpc_seq = self.rpc_seq;
         self.rpc_seq = self.rpc_seq.wrapping_add(1);
 
@@ -855,12 +872,8 @@ impl CmdqInner<'_> {
             .gsp_mem
             .allocate_command::<GspGmcMsgElement>(payload.len(), Self::ALLOCATE_TIMEOUT)?;
 
-        let msg_element = GspGmcMsgElement::init(
-            command_id,
-            u64::from(rpc_seq),
-            payload.len(),
-            max_response_size,
-        );
+        let msg_element =
+            GspGmcMsgElement::init(command_id, rpc_seq, payload.len(), max_response_size);
         // SAFETY: `dst.header` is a valid reference, and not written if the initializer fails.
         unsafe {
             pin_init::raw_try_init(core::ptr::from_mut(dst.header), msg_element)?;
@@ -880,7 +893,7 @@ impl CmdqInner<'_> {
         let elem_count = dst.header.element_count();
         self.gsp_mem.advance_cpu_write_ptr(elem_count);
 
-        Ok(())
+        Ok(rpc_seq)
     }
 
     /// Receives an element from the GSP.
@@ -1302,8 +1315,8 @@ impl CmdqInner<'_> {
         })
     }
 
-    /// Waits for the response to the GMC request with command id `command_id`, up to
-    /// [`Cmdq::RECEIVE_TIMEOUT`] from the call.
+    /// Waits for the response to the GMC request with command id `command_id` and RPC sequence
+    /// number `sequence`, up to [`Cmdq::RECEIVE_TIMEOUT`] from the call.
     ///
     /// The response's payload is passed to `decode`, as two slices because the ring may wrap.
     /// Every other GMC element that arrives first is passed to `on_other` with the headers that
@@ -1321,6 +1334,7 @@ impl CmdqInner<'_> {
     fn await_gmc_response<R>(
         &mut self,
         command_id: u32,
+        sequence: u32,
         mut on_other: impl FnMut(&GspGmcMsgElement, &[u8], &[u8]) -> Result,
         mut decode: impl FnMut(&[u8], &[u8]) -> Result<R>,
     ) -> Result<R> {
@@ -1334,7 +1348,7 @@ impl CmdqInner<'_> {
 
             let response =
                 self.receive_gmc_and_dispatch(remaining, |header, payload_0, payload_1| {
-                    if header.gmc.command_id() != command_id {
+                    if !header.gmc.is_response_to(command_id, sequence) {
                         return on_other(header, payload_0, payload_1).map(|()| None);
                     }
 

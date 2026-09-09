@@ -79,10 +79,12 @@ pub(crate) fn gsp_init(
     // Qualified because `zerocopy::IntoBytes` also gives `[T]` an `as_bytes`.
     let payload = AsBytes::as_bytes(payload);
 
-    cmdq.send_gmc_no_wait(GMCAPI_CMD_GSP_INIT, payload, GSP_INIT_MAX_RESPONSE_SIZE)?;
+    let sequence =
+        cmdq.send_gmc_no_wait(GMCAPI_CMD_GSP_INIT, payload, GSP_INIT_MAX_RESPONSE_SIZE)?;
 
     cmdq.await_gmc_response(
         GMCAPI_CMD_GSP_INIT,
+        sequence,
         on_unsolicited_element,
         decode_gsp_init_reply,
     )
@@ -124,9 +126,9 @@ pub(crate) use fw::commands::PowerStateLevel;
 ///
 /// # Errors
 ///
-/// Errors from [`Cmdq::send_gmc_no_wait`] are propagated as-is.
+/// Errors from [`Cmdq::send_gmc_no_reply`] are propagated as-is.
 pub(crate) fn gsp_suspend(cmdq: &Cmdq<'_>, level: PowerStateLevel) -> Result {
     let params = fw::commands::GspSuspend::new(level);
 
-    cmdq.send_gmc_no_wait(GMCAPI_CMD_GSP_SUSPEND, AsBytes::as_bytes(&params), 0)
+    cmdq.send_gmc_no_reply(GMCAPI_CMD_GSP_SUSPEND, AsBytes::as_bytes(&params))
 }
