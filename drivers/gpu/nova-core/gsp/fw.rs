@@ -752,6 +752,9 @@ pub(crate) struct GmcApiHeader {
 /// Bits of [`GmcApiHeader::command`] that hold the command id. The high byte holds flags.
 const GMCAPI_COMMAND_ID_MASK: u32 = 0x00ff_ffff;
 
+/// Flag bit of [`GmcApiHeader::command`] that GSP-RM sets on a response.
+const GMCAPI_COMMAND_FLAGS_RESPONSE: u32 = 0x0100_0000;
+
 /// GMC request that carries the system information and registry keys to GSP-RM. GSP-RM answers
 /// it with the static GPU configuration once it has finished starting.
 pub(crate) const GMCAPI_CMD_GSP_INIT: u32 = bindings::GMCAPI_COMMANDS_GMCAPI_CMD_GSP_INIT;
@@ -798,12 +801,25 @@ impl GmcApiHeader {
         self.command & GMCAPI_COMMAND_ID_MASK
     }
 
+    /// Returns `true` if GSP-RM sent this header as a response rather than an event.
+    fn is_response(&self) -> bool {
+        self.command & GMCAPI_COMMAND_FLAGS_RESPONSE != 0
+    }
+
     /// Returns the `NV_STATUS` that a response carries.
     ///
-    /// The value is meaningful only on a response, which GSP-RM marks with a flag in the command
-    /// word. In a request, the same word holds the largest response that the sender accepts.
+    /// The value is meaningful only when [`Self::is_response`] is `true`. In a request, the same
+    /// word holds the largest response that the sender accepts.
     pub(crate) fn status(&self) -> u32 {
         self.max_resp_or_status
+    }
+
+    /// Returns `true` if this header answers the request with command id `command_id` and RPC
+    /// sequence number `sequence`.
+    pub(crate) fn is_response_to(&self, command_id: u32, sequence: u32) -> bool {
+        self.is_response()
+            && self.command_id() == command_id
+            && self.sequence == u64::from(sequence)
     }
 }
 
@@ -828,7 +844,7 @@ static_assert!(
 
 impl GspGmcMsgElement {
     /// Creates the queue element header and the GMC API header of a request that carries
-    /// `payload_size` bytes of payload.
+    /// `payload_size` bytes of payload under the RPC sequence number `sequence`.
     ///
     /// `max_response_size` is the largest response that the sender accepts, and zero for a request
     /// that GSP-RM does not answer.
@@ -838,7 +854,7 @@ impl GspGmcMsgElement {
     /// - `EOVERFLOW` if a length does not fit its 32-bit field.
     pub(crate) fn init(
         command_id: u32,
-        sequence: u64,
+        sequence: u32,
         payload_size: usize,
         max_response_size: u32,
     ) -> impl Init<Self, Error> {
@@ -852,7 +868,7 @@ impl GspGmcMsgElement {
             gmc: GmcApiHeader {
                 command: command_id,
                 size: payload_size.try_into().map_err(|_| EOVERFLOW)?,
-                sequence,
+                sequence: u64::from(sequence),
                 max_resp_or_status: max_response_size,
                 reserved: [0; 5],
             },
