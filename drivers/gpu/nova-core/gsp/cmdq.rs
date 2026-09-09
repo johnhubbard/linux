@@ -532,6 +532,7 @@ impl<'cmdq> Cmdq<'cmdq> {
     /// Creates a new command queue for `dev`.
     pub(crate) fn new(
         dev: &'cmdq device::Device<device::Bound>,
+        bar: Bar0<'cmdq>,
     ) -> impl PinInit<Self, Error> + 'cmdq {
         pin_init_scope(move || {
             let gsp_mem = DmaGspMem::new(dev)?;
@@ -540,6 +541,7 @@ impl<'cmdq> Cmdq<'cmdq> {
                 dma_addr: gsp_mem.0.dma_address(),
                 inner <- new_mutex!(CmdqInner {
                     dev,
+                    bar,
                     gsp_mem,
                     seq: 0,
                     poisoned: Cell::new(false),
@@ -582,7 +584,7 @@ impl<'cmdq> Cmdq<'cmdq> {
     ///   written to by its [`CommandToGsp::init_variable_payload`] method.
     ///
     /// Error codes returned by the command and reply initializers are propagated as-is.
-    pub(crate) fn send_command<M>(&self, bar: Bar0<'_>, command: M) -> Result<M::Reply>
+    pub(crate) fn send_command<M>(&self, command: M) -> Result<M::Reply>
     where
         M: CommandToGsp,
         M::Reply: MessageFromGsp,
@@ -590,7 +592,7 @@ impl<'cmdq> Cmdq<'cmdq> {
         Error: From<<M::Reply as MessageFromGsp>::InitError>,
     {
         let mut inner = self.inner.lock();
-        inner.send_command(bar, command)?;
+        inner.send_command(command)?;
 
         inner.await_msg()
     }
@@ -604,12 +606,12 @@ impl<'cmdq> Cmdq<'cmdq> {
     ///   written to by its [`CommandToGsp::init_variable_payload`] method.
     ///
     /// Error codes returned by the command initializers are propagated as-is.
-    pub(crate) fn send_command_no_wait<M>(&self, bar: Bar0<'_>, command: M) -> Result
+    pub(crate) fn send_command_no_wait<M>(&self, command: M) -> Result
     where
         M: CommandToGsp<Reply = NoReply>,
         Error: From<M::InitError>,
     {
-        self.inner.lock().send_command(bar, command)
+        self.inner.lock().send_command(command)
     }
 
     /// Waits for an unsolicited GSP event of type `M`. Events that arrive before it are logged and
@@ -652,6 +654,8 @@ impl<'cmdq> Cmdq<'cmdq> {
 struct CmdqInner<'a> {
     /// Device this command queue belongs to.
     dev: &'a device::Device,
+    /// MMIO mapping of PCI BAR 0, for writing the GSP doorbell.
+    bar: Bar0<'a>,
     /// Current command sequence number.
     seq: u32,
     /// Set once a message fails framing or checksum validation. Every later receive fails, since
@@ -678,7 +682,7 @@ impl CmdqInner<'_> {
     ///   written to by its [`CommandToGsp::init_variable_payload`] method.
     ///
     /// Error codes returned by the command initializers are propagated as-is.
-    fn send_single_command<M>(&mut self, bar: Bar0<'_>, command: M) -> Result
+    fn send_single_command<M>(&mut self, command: M) -> Result
     where
         M: CommandToGsp,
         // This allows all error types, including `Infallible`, to be used for `M::InitError`.
@@ -732,7 +736,7 @@ impl CmdqInner<'_> {
         let elem_count = dst.header.element_count();
         self.seq += 1;
         self.gsp_mem.advance_cpu_write_ptr(elem_count);
-        Cmdq::notify_gsp(bar);
+        Cmdq::notify_gsp(self.bar);
 
         Ok(())
     }
@@ -748,19 +752,19 @@ impl CmdqInner<'_> {
     ///   written to by its [`CommandToGsp::init_variable_payload`] method.
     ///
     /// Error codes returned by the command initializers are propagated as-is.
-    fn send_command<M>(&mut self, bar: Bar0<'_>, command: M) -> Result
+    fn send_command<M>(&mut self, command: M) -> Result
     where
         M: CommandToGsp,
         Error: From<M::InitError>,
     {
         match SplitState::new(command)? {
-            SplitState::Single(command) => self.send_single_command(bar, command),
+            SplitState::Single(command) => self.send_single_command(command),
             SplitState::Split(command, mut continuations) => {
-                self.send_single_command(bar, command)?;
+                self.send_single_command(command)?;
 
                 while let Some(continuation) = continuations.next() {
                     // Turbofish needed because the compiler cannot infer M here.
-                    self.send_single_command::<ContinuationRecord<'_>>(bar, continuation)?;
+                    self.send_single_command::<ContinuationRecord<'_>>(continuation)?;
                 }
 
                 Ok(())
