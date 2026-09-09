@@ -140,21 +140,22 @@ pub(crate) fn gsp_init(
     // Qualified because `zerocopy::IntoBytes` also gives `[T]` an `as_bytes`.
     let payload = AsBytes::as_bytes(payload);
 
-    cmdq.send_gmc_no_wait(GMCAPI_CMD_GSP_INIT, payload, GSP_INIT_MAX_RESPONSE_SIZE)?;
+    let sequence =
+        cmdq.send_gmc_no_wait(GMCAPI_CMD_GSP_INIT, payload, GSP_INIT_MAX_RESPONSE_SIZE)?;
 
     loop {
         let reply = cmdq.receive_gmc_and_dispatch(
             Cmdq::RECEIVE_TIMEOUT,
-            |command_id, max_resp_or_status, payload_0, payload_1| {
-                if command_id == GMCAPI_CMD_GSP_INIT {
+            |header, payload_0, payload_1| {
+                if header.is_response_to(GMCAPI_CMD_GSP_INIT, sequence) {
                     Some(decode_gsp_init_reply(
-                        max_resp_or_status,
+                        header.gmc.max_resp_or_status,
                         payload_0,
                         payload_1,
                     ))
                 } else {
                     // A boot event. Keep waiting for the reply unless handling it failed.
-                    match on_boot_event(command_id, payload_0) {
+                    match on_boot_event(header.gmc.command_id(), payload_0) {
                         Ok(()) => None,
                         Err(e) => Some(Err(e)),
                     }
@@ -243,4 +244,5 @@ pub(crate) fn gsp_suspend(cmdq: &Cmdq<'_>, level: PowerStateLevel) -> Result {
     let params = fw::commands::GspSuspend::new(level);
 
     cmdq.send_gmc_no_wait(GMCAPI_CMD_GSP_SUSPEND, AsBytes::as_bytes(&params), 0)
+        .map(|_| ())
 }

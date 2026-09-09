@@ -606,7 +606,7 @@ impl<'cmdq> Cmdq<'cmdq> {
     pub(crate) fn receive_gmc_and_dispatch<R>(
         &self,
         timeout: Delta,
-        handler: impl FnOnce(u32, u32, &[u8], &[u8]) -> Option<R>,
+        handler: impl FnOnce(&GspGmcMsgElement, &[u8], &[u8]) -> Option<R>,
     ) -> Result<Option<R>> {
         self.inner.lock().receive_gmc_and_dispatch(timeout, handler)
     }
@@ -623,7 +623,7 @@ impl<'cmdq> Cmdq<'cmdq> {
         command_id: u32,
         payload: &[u8],
         max_response_size: u32,
-    ) -> Result {
+    ) -> Result<u64> {
         self.inner
             .lock()
             .send_gmc(command_id, payload, max_response_size)
@@ -801,7 +801,7 @@ impl CmdqInner<'_> {
     /// - `EMSGSIZE` if the request exceeds the maximum queue element size.
     /// - `ETIMEDOUT` if queue space does not become available within the timeout.
     /// - `EIO` if the element header is not properly aligned.
-    fn send_gmc(&mut self, command_id: u32, payload: &[u8], max_response_size: u32) -> Result {
+    fn send_gmc(&mut self, command_id: u32, payload: &[u8], max_response_size: u32) -> Result<u64> {
         let rpc_seq = self.rpc_seq;
         self.rpc_seq = self.rpc_seq.wrapping_add(1);
 
@@ -834,7 +834,7 @@ impl CmdqInner<'_> {
         let elem_count = dst.header.element_count();
         self.gsp_mem.advance_cpu_write_ptr(elem_count);
 
-        Ok(())
+        Ok(u64::from(rpc_seq))
     }
 
     /// Waits for the next queue element and decodes it as the kind of message its NVDM type
@@ -1169,7 +1169,7 @@ impl CmdqInner<'_> {
     fn receive_gmc_and_dispatch<R>(
         &mut self,
         timeout: Delta,
-        handler: impl FnOnce(u32, u32, &[u8], &[u8]) -> Option<R>,
+        handler: impl FnOnce(&GspGmcMsgElement, &[u8], &[u8]) -> Option<R>,
     ) -> Result<Option<R>> {
         let element = self.wait_for_element(timeout)?;
         let element_count = element.element_count();
@@ -1195,12 +1195,7 @@ impl CmdqInner<'_> {
 
                     None
                 } else {
-                    handler(
-                        header.gmc.command_id(),
-                        header.gmc.max_resp_or_status,
-                        message.contents.0,
-                        message.contents.1,
-                    )
+                    handler(header, message.contents.0, message.contents.1)
                 }
             }
         };
