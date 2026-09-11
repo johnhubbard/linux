@@ -27,6 +27,8 @@
 #[allow(clippy::ptr_as_ptr)]
 #[allow(clippy::ref_as_ptr)]
 #[allow(clippy::undocumented_unsafe_blocks)]
+// `bindgen` emits `#[allow(...)]` for lints newer than the minimum supported `rustc`.
+#[allow(unknown_lints)]
 #[cfg_attr(CONFIG_RUSTC_HAS_UNNECESSARY_TRANSMUTES, allow(unnecessary_transmutes))]
 #[cfg_attr(
     CONFIG_RUSTC_HAS_SUSPICIOUS_RUNTIME_SYMBOL_DEFINITIONS,
