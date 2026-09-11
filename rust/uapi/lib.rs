@@ -24,6 +24,8 @@
     unreachable_pub,
     unsafe_op_in_unsafe_fn
 )]
+// `bindgen` emits `#[allow(...)]` for lints newer than the minimum supported `rustc`.
+#![allow(unknown_lints)]
 #![cfg_attr(CONFIG_RUSTC_HAS_UNNECESSARY_TRANSMUTES, allow(unnecessary_transmutes))]
 #![cfg_attr(
     CONFIG_RUSTC_HAS_SUSPICIOUS_RUNTIME_SYMBOL_DEFINITIONS,
