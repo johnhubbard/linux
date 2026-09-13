@@ -65,12 +65,12 @@ impl<'gsp> super::Gsp<'gsp> {
     /// user-space, patching them with signatures, and building firmware-specific intricate data
     /// structures that the GSP will use at runtime.
     ///
-    /// Upon return, the GSP is up and running, and its unload bundle (to be given as argument to
-    /// [`Self::unload`]) returned.
+    /// On return, the GSP is running, and the caller gets the static configuration it reported
+    /// and the unload bundle for [`Self::unload`].
     pub(crate) fn boot(
         self: Pin<&mut Self>,
         mut ctx: super::GspBootContext<'_, 'gsp>,
-    ) -> Result<Option<super::UnloadBundle<'gsp>>> {
+    ) -> Result<super::BootResult<'gsp>> {
         let pdev = ctx.pdev;
         let chipset = ctx.chipset;
         let gsp_falcon = ctx.gsp_falcon;
@@ -118,7 +118,12 @@ impl<'gsp> super::Gsp<'gsp> {
         // Wait until GSP is fully initialized.
         commands::wait_gsp_init_done(&self.cmdq)?;
 
-        Ok(unload_guard.dismiss().1)
+        let static_info = self.cmdq.send_command(commands::GetGspStaticInfo)?;
+
+        Ok(super::BootResult {
+            unload_bundle: unload_guard.dismiss().1,
+            static_info,
+        })
     }
 
     /// Restarts GSP-RM after a load-and-execute image has run.
