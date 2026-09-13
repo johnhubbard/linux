@@ -235,11 +235,16 @@ unsafe impl FromBytes for GspMem {}
 ///   pointer and the GSP read pointer. This region is returned by [`Self::driver_write_area`].
 /// * The driver owns (i.e. can read from) the part of the GSP message queue between the CPU read
 ///   pointer and the GSP write pointer. This region is returned by [`Self::driver_read_area`].
-struct DmaGspMem<'a>(Coherent<'a, GspMem>);
+struct DmaGspMem<'a> {
+    /// The queues, mapped for the GSP.
+    mem: Coherent<'a, GspMem>,
+    /// MMIO mapping of PCI BAR0, for the doorbell register.
+    bar: Bar0<'a>,
+}
 
 impl<'a> DmaGspMem<'a> {
     /// Allocate a new instance and map it for `dev`.
-    fn new(dev: &'a device::Device<device::Bound>) -> Result<Self> {
+    fn new(dev: &'a device::Device<device::Bound>, bar: Bar0<'a>) -> Result<Self> {
         const MSGQ_SIZE: u32 = num::usize_into_u32::<{ size_of::<Msgq>() }>();
         const RX_HDR_OFF: u32 = num::usize_into_u32::<{ mem::offset_of!(Msgq, rx) }>();
 
@@ -250,7 +255,7 @@ impl<'a> DmaGspMem<'a> {
         let gsp_mem: Coherent<'_, _> = gsp_mem.into();
         PteArray::init(io_project!(gsp_mem, .ptes), gsp_mem.dma_address())?;
 
-        Ok(Self(gsp_mem))
+        Ok(Self { mem: gsp_mem, bar })
     }
 
     /// Returns the region of the CPU message queue that the driver is currently allowed to write
@@ -263,7 +268,7 @@ impl<'a> DmaGspMem<'a> {
         let rx = self.gsp_read_ptr();
 
         // Pointer to the first entry of the CPU message queue.
-        let data = ptr::project!(mut self.0.as_mut_ptr(), .cpuq.msgq.data[build: 0]);
+        let data = ptr::project!(mut self.mem.as_mut_ptr(), .cpuq.msgq.data[build: 0]);
 
         let (tail_end, wrap_end) = if rx == 0 {
             // The write area is non-wrapping, and stops at the second-to-last entry of the command
@@ -325,7 +330,7 @@ impl<'a> DmaGspMem<'a> {
         let rx = self.cpu_read_ptr();
 
         // Pointer to the first entry of the GSP message queue.
-        let data = ptr::project!(self.0.as_ptr(), .gspq.msgq.data[build: 0]);
+        let data = ptr::project!(self.mem.as_ptr(), .gspq.msgq.data[build: 0]);
 
         let (tail_end, wrap_end) = if rx <= tx {
             // Read area is non-wrapping and stops right before `tx`.
@@ -409,7 +414,7 @@ impl<'a> DmaGspMem<'a> {
     //
     // - The returned value is within `0..MSGQ_NUM_PAGES`.
     fn gsp_write_ptr(&self) -> u32 {
-        let ptr = MsgqTxHeader::write_ptr(io_project!(self.0, .gspq.tx)) % MSGQ_NUM_PAGES;
+        let ptr = MsgqTxHeader::write_ptr(io_project!(self.mem, .gspq.tx)) % MSGQ_NUM_PAGES;
 
         // ORDERING: LOAD->LOAD ordering needed to order `gsp_write_ptr` read before data read.
         dma_mb(Read);
@@ -423,7 +428,7 @@ impl<'a> DmaGspMem<'a> {
     //
     // - The returned value is within `0..MSGQ_NUM_PAGES`.
     fn gsp_read_ptr(&self) -> u32 {
-        let ptr = MsgqRxHeader::read_ptr(io_project!(self.0, .gspq.rx)) % MSGQ_NUM_PAGES;
+        let ptr = MsgqRxHeader::read_ptr(io_project!(self.mem, .gspq.rx)) % MSGQ_NUM_PAGES;
 
         // ORDERING: LOAD->STORE ordering needed to order `gsp_read_ptr` read before data write.
         dma_mb(Full);
@@ -437,7 +442,7 @@ impl<'a> DmaGspMem<'a> {
     //
     // - The returned value is within `0..MSGQ_NUM_PAGES`.
     fn cpu_read_ptr(&self) -> u32 {
-        MsgqRxHeader::read_ptr(io_project!(self.0, .cpuq.rx)) % MSGQ_NUM_PAGES
+        MsgqRxHeader::read_ptr(io_project!(self.mem, .cpuq.rx)) % MSGQ_NUM_PAGES
     }
 
     // Informs the GSP that it can send `elem_count` new pages into the message queue.
@@ -445,7 +450,7 @@ impl<'a> DmaGspMem<'a> {
         // ORDERING: LOAD->STORE ordering needed to order `cpu_read_ptr` write after data read.
         dma_mb(Full);
 
-        let rx = io_project!(self.0, .cpuq.rx);
+        let rx = io_project!(self.mem, .cpuq.rx);
         let rptr = MsgqRxHeader::read_ptr(rx).wrapping_add(elem_count) % MSGQ_NUM_PAGES;
         MsgqRxHeader::set_read_ptr(rx, rptr)
     }
@@ -456,17 +461,22 @@ impl<'a> DmaGspMem<'a> {
     //
     // - The returned value is within `0..MSGQ_NUM_PAGES`.
     fn cpu_write_ptr(&self) -> u32 {
-        MsgqTxHeader::write_ptr(io_project!(self.0, .cpuq.tx)) % MSGQ_NUM_PAGES
+        MsgqTxHeader::write_ptr(io_project!(self.mem, .cpuq.tx)) % MSGQ_NUM_PAGES
     }
 
-    // Informs the GSP that it can process `elem_count` new pages from the command queue.
+    // Publishes `elem_count` more pages of the command queue to the GSP and rings the doorbell.
     fn advance_cpu_write_ptr(&mut self, elem_count: u32) {
         // ORDERING: STORE->STORE ordering needed to order `cpu_write_ptr` write after data write.
         dma_mb(Write);
 
-        let tx = io_project!(self.0, .cpuq.tx);
+        let tx = io_project!(self.mem, .cpuq.tx);
         let wptr = MsgqTxHeader::write_ptr(tx).wrapping_add(elem_count) % MSGQ_NUM_PAGES;
         MsgqTxHeader::set_write_ptr(tx, wptr);
+
+        // A write to the head register interrupts the GSP. The pointer itself is in the
+        // shared-memory header, so the value written does not matter.
+        self.bar
+            .write_reg(regs::NV_PGSP_QUEUE_HEAD::zeroed().with_address(0u32));
     }
 }
 
@@ -531,13 +541,12 @@ impl<'cmdq> Cmdq<'cmdq> {
         bar: Bar0<'cmdq>,
     ) -> impl PinInit<Self, Error> + 'cmdq {
         pin_init_scope(move || {
-            let gsp_mem = DmaGspMem::new(dev)?;
+            let gsp_mem = DmaGspMem::new(dev, bar)?;
 
             Ok(try_pin_init!(Self {
-                dma_addr: gsp_mem.0.dma_address(),
+                dma_addr: gsp_mem.mem.dma_address(),
                 inner <- new_mutex!(CmdqInner {
                     dev,
-                    bar,
                     gsp_mem,
                     seq: 0,
                 }),
@@ -556,11 +565,6 @@ impl<'cmdq> Cmdq<'cmdq> {
             .fold(0, |acc, (rol, byte)| acc ^ u64::from(byte).rotate_left(rol));
 
         ((sum64 >> 32) as u32) ^ (sum64 as u32)
-    }
-
-    /// Notifies the GSP that we have updated the command queue pointers.
-    fn notify_gsp(bar: Bar0<'_>) {
-        bar.write_reg(regs::NV_PGSP_QUEUE_HEAD::zeroed().with_address(0u32));
     }
 
     /// Sends `command` to the GSP and waits for the reply.
@@ -649,8 +653,6 @@ impl<'cmdq> Cmdq<'cmdq> {
 struct CmdqInner<'a> {
     /// Device this command queue belongs to.
     dev: &'a device::Device,
-    /// MMIO mapping of PCI BAR0, for writing the GSP doorbell.
-    bar: Bar0<'a>,
     /// Current command sequence number.
     seq: u32,
     /// Memory area shared with the GSP for communicating commands and messages.
@@ -725,7 +727,6 @@ impl CmdqInner<'_> {
         let elem_count = dst.header.element_count();
         self.seq += 1;
         self.gsp_mem.advance_cpu_write_ptr(elem_count);
-        Cmdq::notify_gsp(self.bar);
 
         Ok(())
     }
