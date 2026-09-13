@@ -205,7 +205,7 @@ impl CommandToGsp for GetGspStaticInfo {
     }
 }
 
-/// The reply from the GSP to the [`GetGspStaticInfo`] command.
+/// The static GPU configuration, which GSP-RM reports in reply to [`GetGspStaticInfo`].
 pub(crate) struct GspStaticInfo {
     gpu_name: [u8; 64],
     /// BAR1 Page Directory Entry base address.
