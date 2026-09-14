@@ -39,7 +39,11 @@ use crate::{
     },
     gsp::{
         cmdq::Cmdq,
-        commands, //
+        commands,
+        fw::{
+            GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER,
+            GMCAPI_CMD_EXEC_HS_BINARY, //
+        }, //
     },
     regs,
     sbuffer::SBufferIter, //
@@ -133,10 +137,51 @@ impl LoadExecContext<'_, '_> {
         Ok(())
     }
 
-    /// Runs the generic bootloader on the GSP falcon, as a `GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER`
-    /// event requests, and then restarts GSP-RM.
+    /// Runs the load-and-execute handler that `command_id` names on the event payload, which the
+    /// ring may have split in two, and then runs the core resume.
     ///
-    /// The descriptor that the event carries names the image that the bootloader loads.
+    /// # Errors
+    ///
+    /// - `EINVAL` if `command_id` is not a load-and-execute command.
+    ///
+    /// Errors from the handlers and from [`Self::core_resume`] are propagated as-is.
+    #[expect(dead_code)]
+    fn dispatch_gmc_boot_event(
+        &self,
+        command_id: u32,
+        payload_0: &[u8],
+        payload_1: &[u8],
+    ) -> Result {
+        let handled = match command_id {
+            GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER => {
+                self.handle_load_exec_bootloader(payload_0, payload_1)
+            }
+            GMCAPI_CMD_EXEC_HS_BINARY => self.handle_load_exec_hs_binary(payload_0, payload_1),
+            _ => {
+                dev_err!(
+                    self.dev,
+                    "Unexpected GMC boot event: command_id={:#010x}\n",
+                    command_id
+                );
+                return Err(EINVAL);
+            }
+        };
+
+        handled.and_then(|()| self.core_resume()).inspect_err(|e| {
+            dev_err!(
+                self.dev,
+                "GMC boot event {:#010x} failed: {:?}\n",
+                command_id,
+                e
+            );
+        })
+    }
+
+    /// Runs the generic bootloader on the GSP falcon, as a `GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER`
+    /// event requests.
+    ///
+    /// The descriptor that the event carries names the image that the bootloader loads. The GSP
+    /// falcon is left halted.
     ///
     /// # Errors
     ///
@@ -145,9 +190,6 @@ impl LoadExecContext<'_, '_> {
     ///   it, or if the event names a context DMA slot or an aperture that does not exist.
     /// - `ETIMEDOUT` if the RISC-V core does not suspend within two seconds, or the GSP falcon does
     ///   not halt within two seconds of starting the image.
-    ///
-    /// Errors from [`Self::core_resume`] are propagated as-is.
-    #[expect(dead_code)]
     fn handle_load_exec_bootloader(&self, payload_0: &[u8], payload_1: &[u8]) -> Result {
         let Some(bootloader) = self.bootloader else {
             dev_err!(
@@ -196,16 +238,14 @@ impl LoadExecContext<'_, '_> {
 
                 Ok(())
             },
-        )?;
-
-        self.core_resume()
+        )
     }
 
     /// Runs a Heavy-Secured (HS) binary on the GSP falcon, as a `GMCAPI_CMD_EXEC_HS_BINARY` event
-    /// requests, and then restarts GSP-RM.
+    /// requests.
     ///
     /// GSP-RM has placed the binary in the framebuffer, and the falcon's boot ROM (BROM) verifies
-    /// the binary's signature before the binary runs.
+    /// the binary's signature before the binary runs. The GSP falcon is left halted.
     ///
     /// # Errors
     ///
@@ -213,9 +253,6 @@ impl LoadExecContext<'_, '_> {
     ///   fit the BROM register field.
     /// - `ETIMEDOUT` if the RISC-V core does not suspend within two seconds, or the GSP falcon does
     ///   not halt within two seconds of starting the binary.
-    ///
-    /// Errors from [`Self::core_resume`] are propagated as-is.
-    #[expect(dead_code)]
     fn handle_load_exec_hs_binary(&self, payload_0: &[u8], payload_1: &[u8]) -> Result {
         let params = read_params::<HsBinaryParams>(payload_0, payload_1)?;
 
@@ -286,9 +323,7 @@ impl LoadExecContext<'_, '_> {
 
                 Ok(())
             },
-        )?;
-
-        self.core_resume()
+        )
     }
 }
 
