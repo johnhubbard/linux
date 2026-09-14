@@ -25,7 +25,6 @@ use crate::{
         gsp::Gsp,
         Falcon,
         FalconBromParams,
-        FalconDmaLoadTarget,
         FalconDmaLoadable,
         FalconFbifMemType,
         FalconFbifTarget,
@@ -36,115 +35,15 @@ use crate::{
     },
     firmware::{
         fwsec::FwsecFirmware,
-        gen_bootloader::GenericBootloader, //
+        gen_bootloader::{
+            BootloaderDmemDescV2,
+            GenericBootloader, //
+        },
     },
     gpu::Chipset,
     num::FromSafeCast, //
     regs,
 };
-
-/// Structure used by the boot-loader to load the rest of the code.
-///
-/// This has to be filled by the GPU driver and copied into DMEM at offset
-/// [`BootloaderDesc.dmem_load_off`].
-#[repr(C, packed)]
-#[derive(Debug, Clone)]
-struct BootloaderDmemDescV2 {
-    /// Reserved, should always be first element.
-    reserved: [u32; 4],
-    /// 16B signature for secure code, 0s if no secure code.
-    signature: [u32; 4],
-    /// DMA context used by the bootloader while loading code/data.
-    ctx_dma: u32,
-    /// 256B-aligned physical FB address where code is located.
-    code_dma_base: u64,
-    /// Offset from `code_dma_base` where the non-secure code is located.
-    ///
-    /// Also used as destination IMEM offset of non-secure code as the DMA firmware object is
-    /// expected to be a mirror image of its loaded state.
-    ///
-    /// Must be multiple of 256.
-    non_sec_code_off: u32,
-    /// Size of the non-secure code part.
-    non_sec_code_size: u32,
-    /// Offset from `code_dma_base` where the secure code is located (must be multiple of 256).
-    ///
-    /// Also used as destination IMEM offset of secure code as the DMA firmware object is expected
-    /// to be a mirror image of its loaded state.
-    ///
-    /// Must be multiple of 256.
-    sec_code_off: u32,
-    /// Size of the secure code part.
-    sec_code_size: u32,
-    /// Code entry point invoked by the bootloader after code is loaded.
-    code_entry_point: u32,
-    /// 256B-aligned physical FB address where data is located.
-    data_dma_base: u64,
-    /// Size of data block (should be multiple of 256B).
-    data_size: u32,
-    /// Number of arguments to be passed to the target firmware being loaded.
-    argc: u32,
-    /// Arguments to be passed to the target firmware being loaded.
-    argv: u32,
-}
-// SAFETY: This struct doesn't contain uninitialized bytes and doesn't have interior mutability.
-unsafe impl AsBytes for BootloaderDmemDescV2 {}
-
-impl BootloaderDmemDescV2 {
-    /// Builds the descriptor of an image whose code is at `code_dma_base` and whose data is at
-    /// `data_dma_base`.
-    ///
-    /// `imem_ns` and `imem_sec` locate the non-secure and the secure code within the code image,
-    /// and `dmem` gives the size of the data. The code image must be a mirror image of the loaded
-    /// IMEM.
-    ///
-    /// # Errors
-    ///
-    /// - `EINVAL` if `dmem.dst_start` is not 0, because the bootloader copies the data to the start
-    ///   of DMEM.
-    fn new(
-        code_dma_base: u64,
-        imem_ns: FalconDmaLoadTarget,
-        imem_sec: FalconDmaLoadTarget,
-        data_dma_base: u64,
-        dmem: FalconDmaLoadTarget,
-    ) -> Result<Self> {
-        // Bootloader payload is in non-coherent system memory.
-        const FALCON_DMAIDX_PHYS_SYS_NCOH: u32 = 4;
-
-        // The bootloader does not have a data destination offset field and copies the data at
-        // the start of DMEM, so it can only be used if the destination offset of the firmware
-        // is 0.
-        if dmem.dst_start != 0 {
-            return Err(EINVAL);
-        }
-
-        Ok(Self {
-            reserved: [0; 4],
-            signature: [0; 4],
-            ctx_dma: FALCON_DMAIDX_PHYS_SYS_NCOH,
-            code_dma_base,
-            // `dst_start` is also valid as the source offset since the firmware DMA object is
-            // a mirror image of the target IMEM layout.
-            non_sec_code_off: imem_ns.dst_start,
-            non_sec_code_size: imem_ns.len,
-            // `dst_start` is also valid as the source offset since the firmware DMA object is
-            // a mirror image of the target IMEM layout.
-            sec_code_off: imem_sec.dst_start,
-            sec_code_size: imem_sec.len,
-            code_entry_point: 0,
-            data_dma_base,
-            data_size: dmem.len,
-            argc: 0,
-            argv: 0,
-        })
-    }
-
-    /// Returns the DMA context that the bootloader loads the code and data through.
-    fn ctx_dma(&self) -> u32 {
-        self.ctx_dma
-    }
-}
 
 /// Wrapper for [`FwsecFirmware`] that includes the bootloader performing the actual load
 /// operation.
