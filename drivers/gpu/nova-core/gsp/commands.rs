@@ -197,7 +197,7 @@ pub(crate) struct GetGspStaticInfo;
 impl CommandToGsp for GetGspStaticInfo {
     const FUNCTION: MsgFunction = MsgFunction::GetGspStaticInfo;
     type Command = fw::commands::GspStaticConfigInfo;
-    type Reply = GetGspStaticInfoReply;
+    type Reply = GspStaticInfo;
     type InitError = Infallible;
 
     fn init(&self) -> impl Init<Self::Command, Self::InitError> {
@@ -206,7 +206,7 @@ impl CommandToGsp for GetGspStaticInfo {
 }
 
 /// The reply from the GSP to the [`GetGspStaticInfo`] command.
-pub(crate) struct GetGspStaticInfoReply {
+pub(crate) struct GspStaticInfo {
     gpu_name: [u8; 64],
     /// BAR1 Page Directory Entry base address.
     pub(crate) bar1_pde_base: u64,
@@ -216,7 +216,7 @@ pub(crate) struct GetGspStaticInfoReply {
     pub(crate) total_fb_end: u64,
 }
 
-impl MessageFromGsp for GetGspStaticInfoReply {
+impl MessageFromGsp for GspStaticInfo {
     const FUNCTION: MsgFunction = MsgFunction::GetGspStaticInfo;
     type Message = fw::commands::GspStaticConfigInfo;
     type InitError = Error;
@@ -231,7 +231,7 @@ impl MessageFromGsp for GetGspStaticInfoReply {
         }
         let total_fb_end = msg.total_fb_end().ok_or(EINVAL)?;
 
-        Ok(GetGspStaticInfoReply {
+        Ok(GspStaticInfo {
             gpu_name: msg.gpu_name_str(),
             bar1_pde_base: msg.bar1_pde_base(),
             usable_fb_regions,
@@ -240,7 +240,7 @@ impl MessageFromGsp for GetGspStaticInfoReply {
     }
 }
 
-/// Error type for [`GetGspStaticInfoReply::gpu_name`].
+/// Error type for [`GspStaticInfo::gpu_name`].
 #[derive(Debug)]
 pub(crate) enum GpuNameError {
     /// The GPU name string does not contain a null terminator.
@@ -251,7 +251,7 @@ pub(crate) enum GpuNameError {
     InvalidUtf8(Utf8Error),
 }
 
-impl GetGspStaticInfoReply {
+impl GspStaticInfo {
     /// Returns the name of the GPU as a string.
     ///
     /// Returns an error if the string given by the GSP does not contain a null terminator or
