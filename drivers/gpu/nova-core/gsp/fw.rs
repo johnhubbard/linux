@@ -1021,6 +1021,16 @@ pub(crate) struct GmcApiHeader {
 /// Bits of [`GmcApiHeader::command`] that hold the command id. The high byte holds flags.
 const GMCAPI_COMMAND_ID_MASK: u32 = 0x00ff_ffff;
 
+/// GMC event asking the driver to run the generic falcon bootloader against a descriptor that
+/// GSP-RM supplies.
+pub(crate) const GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER: u32 =
+    r000_00::GMCAPI_COMMANDS_GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER;
+
+/// GMC event asking the driver to run a high-security binary that GSP-RM has placed in the
+/// framebuffer.
+pub(crate) const GMCAPI_CMD_EXEC_HS_BINARY: u32 =
+    r000_00::GMCAPI_COMMANDS_GMCAPI_CMD_EXEC_HS_BINARY;
+
 static_assert!(size_of::<GmcApiHeader>() == size_of::<r000_00::GMCAPI_HEADER>());
 static_assert!(
     core::mem::offset_of!(GmcApiHeader, command)

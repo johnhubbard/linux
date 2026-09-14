@@ -36,7 +36,11 @@ use crate::{
     },
     gsp::{
         cmdq::Cmdq,
-        commands, //
+        commands,
+        fw::{
+            GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER,
+            GMCAPI_CMD_EXEC_HS_BINARY, //
+        }, //
     },
     regs, //
 };
@@ -171,6 +175,33 @@ impl<'gsp> super::Gsp<'gsp> {
         Ok(())
     }
 
+    /// Runs the load-and-execute handler that `command_id` names.
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` if `command_id` is not a load-and-execute command.
+    ///
+    /// Errors from the handlers are propagated as-is.
+    #[expect(dead_code)]
+    fn dispatch_gmc_boot_event(
+        ctx: &LoadExecContext<'_, '_>,
+        command_id: u32,
+        payload: &[u8],
+    ) -> Result {
+        match command_id {
+            GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER => Self::handle_load_exec_bootloader(ctx, payload),
+            GMCAPI_CMD_EXEC_HS_BINARY => Self::handle_load_exec_hs_binary(ctx, payload),
+            _ => {
+                dev_err!(
+                    ctx.dev,
+                    "Unexpected GMC boot event: command_id={:#010x}\n",
+                    command_id
+                );
+                Err(EINVAL)
+            }
+        }
+    }
+
     /// Handles a `GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER` event: runs the generic bootloader on the
     /// GSP falcon against the descriptor the event carries, then restarts GSP-RM.
     ///
@@ -180,7 +211,6 @@ impl<'gsp> super::Gsp<'gsp> {
     ///   than the parameter block, if the descriptor is not the size this driver mirrors, or if
     ///   the event names a context DMA slot or an aperture that does not exist.
     /// - `ETIMEDOUT` if the GSP does not suspend, or the image does not halt, in time.
-    #[expect(dead_code)]
     fn handle_load_exec_bootloader(ctx: &LoadExecContext<'_, '_>, payload: &[u8]) -> Result {
         let LoadExecContext {
             gsp_falcon, dev, ..
@@ -259,7 +289,6 @@ impl<'gsp> super::Gsp<'gsp> {
     /// - `EINVAL` if the payload is shorter than the parameter block, or the ucode id does not
     ///   fit the BROM register field.
     /// - `ETIMEDOUT` if the GSP does not suspend, or the binary does not halt, in time.
-    #[expect(dead_code)]
     fn handle_load_exec_hs_binary(ctx: &LoadExecContext<'_, '_>, payload: &[u8]) -> Result {
         let LoadExecContext {
             gsp_falcon, dev, ..
