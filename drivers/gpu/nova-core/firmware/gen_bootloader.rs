@@ -11,6 +11,7 @@ use kernel::{
         Alignable,
         Alignment, //
     },
+    transmute::AsBytes, //
 };
 
 use crate::{
@@ -27,6 +28,53 @@ use crate::{
     gpu::Chipset,
     num::FromSafeCast, //
 };
+
+/// Structure used by the boot-loader to load the rest of the code.
+///
+/// This has to be filled by the GPU driver and copied into DMEM at offset
+/// [`BootloaderDesc.dmem_load_off`].
+#[repr(C, packed)]
+#[derive(Debug, Clone)]
+pub(crate) struct BootloaderDmemDescV2 {
+    /// Reserved, should always be first element.
+    pub(crate) reserved: [u32; 4],
+    /// 16B signature for secure code, 0s if no secure code.
+    pub(crate) signature: [u32; 4],
+    /// DMA context used by the bootloader while loading code/data.
+    pub(crate) ctx_dma: u32,
+    /// 256B-aligned physical FB address where code is located.
+    pub(crate) code_dma_base: u64,
+    /// Offset from `code_dma_base` where the non-secure code is located.
+    ///
+    /// Also used as destination IMEM offset of non-secure code as the DMA firmware object is
+    /// expected to be a mirror image of its loaded state.
+    ///
+    /// Must be multiple of 256.
+    pub(crate) non_sec_code_off: u32,
+    /// Size of the non-secure code part.
+    pub(crate) non_sec_code_size: u32,
+    /// Offset from `code_dma_base` where the secure code is located (must be multiple of 256).
+    ///
+    /// Also used as destination IMEM offset of secure code as the DMA firmware object is expected
+    /// to be a mirror image of its loaded state.
+    ///
+    /// Must be multiple of 256.
+    pub(crate) sec_code_off: u32,
+    /// Size of the secure code part.
+    pub(crate) sec_code_size: u32,
+    /// Code entry point invoked by the bootloader after code is loaded.
+    pub(crate) code_entry_point: u32,
+    /// 256B-aligned physical FB address where data is located.
+    pub(crate) data_dma_base: u64,
+    /// Size of data block (should be multiple of 256B).
+    pub(crate) data_size: u32,
+    /// Number of arguments to be passed to the target firmware being loaded.
+    pub(crate) argc: u32,
+    /// Arguments to be passed to the target firmware being loaded.
+    pub(crate) argv: u32,
+}
+// SAFETY: This struct doesn't contain uninitialized bytes and doesn't have interior mutability.
+unsafe impl AsBytes for BootloaderDmemDescV2 {}
 
 /// The generic falcon bootloader image and its IMEM load parameters.
 pub(crate) struct GenericBootloader {
