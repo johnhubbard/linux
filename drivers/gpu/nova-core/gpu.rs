@@ -35,7 +35,7 @@ use crate::{
     gsp::{
         self,
         cmdq::Cmdq,
-        commands::GetGspStaticInfoReply,
+        commands::GspStaticInfo,
         Gsp,
         GspBootContext, //
     },
@@ -354,7 +354,7 @@ pub(crate) struct Gpu<'gpu> {
     #[pin]
     _gsp_subtree: GspSubtree<'gpu>,
     /// Static GPU information as provided by the GSP.
-    gsp_static_info: GetGspStaticInfoReply,
+    gsp_static_info: GspStaticInfo,
     /// GPU memory manager owning memory management resources.
     ///
     /// Must be kept declared *before* `gsp_resources`, so that its components are dropped while
