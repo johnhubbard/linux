@@ -75,6 +75,12 @@ pub(crate) const fn boot_firmware_files(chipset: Chipset) -> &'static [&'static 
     }
 }
 
+/// Returns true if `chipset` boots its GSP through the generic falcon bootloader.
+#[expect(dead_code)]
+pub(super) const fn uses_generic_bootloader(chipset: Chipset) -> bool {
+    matches!(chipset.arch(), Architecture::Turing) || matches!(chipset, Chipset::GA100)
+}
+
 /// Returns the GSP HAL to be used for `chipset`.
 pub(super) fn gsp_hal(chipset: Chipset) -> &'static dyn GspHal {
     match chipset.arch() {
