@@ -1493,6 +1493,17 @@ int iommu_dma_map_sg(struct device *dev, struct scatterlist *sg, int nents,
 		 *   time through here (i.e. before it has a meaningful value).
 		 */
 		if (pad_len && pad_len < s_length - 1) {
+			/*
+			 * The padding is carried in the previous segment's length,
+			 * an unsigned int that iommu_map_sg() and __finalise_sg()
+			 * read as that segment's IOVA extent, so the sum must fit.
+			 */
+			if (pad_len > UINT_MAX - prev->length) {
+				dev_warn_once(dev, "segment boundary padding of %zu bytes overflows the %u-byte sg segment length\n",
+					      pad_len, prev->length);
+				ret = -EINVAL;
+				goto out_restore_sg;
+			}
 			prev->length += pad_len;
 			iova_len += pad_len;
 		}
