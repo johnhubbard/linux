@@ -2325,9 +2325,105 @@ static int add_folio_for_migration(struct mm_struct *mm, const void __user *p,
 	return err;
 }
 
-static int move_pages_and_store_status(int node,
-		struct list_head *pagelist, int __user *status,
-		int start, int i, unsigned long nr_pages)
+/*
+ * Read entry @i of the user @pages array, which holds 32-bit pointers when
+ * the caller is a compat task.
+ */
+static int get_pages_array_entry(const void __user * __user *pages,
+				 unsigned long i, const void __user **p)
+{
+	if (in_compat_syscall()) {
+		compat_uptr_t __user *compat_pages = (void __user *)pages;
+		compat_uptr_t cp;
+
+		if (get_user(cp, compat_pages + i))
+			return -EFAULT;
+		*p = compat_ptr(cp);
+		return 0;
+	}
+
+	return get_user(*p, pages + i) ? -EFAULT : 0;
+}
+
+/*
+ * Return the node of the page mapped at @addr, or a negative errno.
+ * The caller holds mmap_read_lock().
+ */
+static int get_page_node(struct mm_struct *mm, unsigned long addr)
+{
+	struct vm_area_struct *vma;
+	struct folio_walk fw;
+	struct folio *folio;
+	int err;
+
+	vma = vma_lookup(mm, addr);
+	if (!vma)
+		return -EFAULT;
+
+	folio = folio_walk_start(&fw, vma, addr, FW_ZEROPAGE);
+	if (!folio)
+		return -ENOENT;
+
+	if (is_zero_folio(folio) || is_huge_zero_folio(folio))
+		err = -EFAULT;
+	else if (folio_is_zone_device(folio))
+		err = -ENOENT;
+	else
+		err = folio_nid(folio);
+	folio_walk_end(&fw, vma);
+
+	return err;
+}
+
+/*
+ * Report the pages queued for [@start, @end) after migrate_pages() could not
+ * migrate all of them. The folios left on the list cannot be matched to user
+ * entries, so look each address up again: store @node when the page is
+ * there, -EBUSY when it is still elsewhere, and the lookup error when it is
+ * gone.
+ *
+ * Returns the number of pages that are not on @node, or -EFAULT.
+ */
+static int store_batch_status(struct mm_struct *mm,
+			      const void __user * __user *pages,
+			      int __user *status, int start, int end, int node)
+{
+	int nr_failed = 0;
+	int i;
+
+	for (i = start; i < end; i++) {
+		const void __user *p;
+		unsigned long addr;
+		int val;
+
+		if (get_pages_array_entry(pages, i, &p))
+			return -EFAULT;
+
+		mmap_read_lock(mm);
+		addr = (unsigned long)untagged_addr_remote(mm, p);
+		val = get_page_node(mm, addr);
+		mmap_read_unlock(mm);
+
+		if (val >= 0 && val != node) {
+			val = -EBUSY;
+			nr_failed++;
+		}
+
+		if (put_user(val, status + i))
+			return -EFAULT;
+	}
+
+	return nr_failed;
+}
+
+/*
+ * Returns the number of pages in the batch that are not on @node, or a
+ * negative errno.
+ */
+static int move_pages_and_store_status(struct mm_struct *mm,
+				       const void __user * __user *pages,
+				       int node, struct list_head *pagelist,
+				       int __user *status, int start, int i)
 {
 	int err;
 
@@ -2335,25 +2431,21 @@ static int move_pages_and_store_status(int node,
 		return 0;
 
 	err = do_move_pages_to_node(pagelist, node);
-	if (err) {
-		/*
-		 * Positive err means the number of failed
-		 * pages to migrate.  Since we are going to
-		 * abort and return the number of non-migrated
-		 * pages, so need to include the rest of the
-		 * nr_pages that have not been attempted as
-		 * well.
-		 */
-		if (err > 0)
-			err += nr_pages - i;
+	if (err < 0)
 		return err;
-	}
+	/* A positive err is the number of folios that were not migrated. */
+	if (err > 0)
+		return store_batch_status(mm, pages, status, start, i, node);
+
 	return store_status(status, start, node, i - start);
 }
 
 /*
  * Migrate an array of page address onto an array of nodes and fill
  * the corresponding array of status.
+ *
+ * Returns the number of pages that are still not on their target node, or
+ * a negative errno.
  */
 static int do_pages_move(struct mm_struct *mm, nodemask_t task_nodes,
 			 unsigned long nr_pages,
@@ -2361,10 +2453,10 @@ static int do_pages_move(struct mm_struct *mm, nodemask_t task_nodes,
 			 const int __user *nodes,
 			 int __user *status, int flags)
 {
-	compat_uptr_t __user *compat_pages = (void __user *)pages;
 	int current_node = NUMA_NO_NODE;
 	LIST_HEAD(pagelist);
 	int start, i;
+	int nr_failed = 0;
 	int err = 0, err1;
 
 	lru_cache_disable();
@@ -2374,17 +2466,8 @@ static int do_pages_move(struct mm_struct *mm, nodemask_t task_nodes,
 		int node;
 
 		err = -EFAULT;
-		if (in_compat_syscall()) {
-			compat_uptr_t cp;
-
-			if (get_user(cp, compat_pages + i))
-				goto out_flush;
-
-			p = compat_ptr(cp);
-		} else {
-			if (get_user(p, pages + i))
-				goto out_flush;
-		}
+		if (get_pages_array_entry(pages, i, &p))
+			goto out_flush;
 		if (get_user(node, nodes + i))
 			goto out_flush;
 
@@ -2402,10 +2485,13 @@ static int do_pages_move(struct mm_struct *mm, nodemask_t task_nodes,
 			current_node = node;
 			start = i;
 		} else if (node != current_node) {
-			err = move_pages_and_store_status(current_node,
-					&pagelist, status, start, i, nr_pages);
-			if (err)
+			err = move_pages_and_store_status(mm, pages,
+							  current_node,
+							  &pagelist, status,
+							  start, i);
+			if (err < 0)
 				goto out;
+			nr_failed += err;
 			start = i;
 			current_node = node;
 		}
@@ -2430,22 +2516,19 @@ static int do_pages_move(struct mm_struct *mm, nodemask_t task_nodes,
 		if (err)
 			goto out_flush;
 
-		err = move_pages_and_store_status(current_node, &pagelist,
-				status, start, i, nr_pages);
-		if (err) {
-			/* We have accounted for page i */
-			if (err > 0)
-				err--;
+		err = move_pages_and_store_status(mm, pages, current_node,
+						  &pagelist, status, start, i);
+		if (err < 0)
 			goto out;
-		}
+		nr_failed += err;
 		current_node = NUMA_NO_NODE;
 	}
 out_flush:
 	/* Make sure we do not overwrite the existing error */
-	err1 = move_pages_and_store_status(current_node, &pagelist,
-				status, start, i, nr_pages);
+	err1 = move_pages_and_store_status(mm, pages, current_node, &pagelist,
+					   status, start, i);
 	if (err >= 0)
-		err = err1;
+		err = err1 < 0 ? err1 : nr_failed + err1;
 out:
 	lru_cache_enable();
 	return err;
@@ -2461,35 +2544,8 @@ static void do_pages_stat_array(struct mm_struct *mm, unsigned long nr_pages,
 
 	mmap_read_lock(mm);
 
-	for (i = 0; i < nr_pages; i++) {
-		unsigned long addr = (unsigned long)(*pages);
-		struct vm_area_struct *vma;
-		struct folio_walk fw;
-		struct folio *folio;
-		int err = -EFAULT;
-
-		vma = vma_lookup(mm, addr);
-		if (!vma)
-			goto set_status;
-
-		folio = folio_walk_start(&fw, vma, addr, FW_ZEROPAGE);
-		if (folio) {
-			if (is_zero_folio(folio) || is_huge_zero_folio(folio))
-				err = -EFAULT;
-			else if (folio_is_zone_device(folio))
-				err = -ENOENT;
-			else
-				err = folio_nid(folio);
-			folio_walk_end(&fw, vma);
-		} else {
-			err = -ENOENT;
-		}
-set_status:
-		*status = err;
-
-		pages++;
-		status++;
-	}
+	for (i = 0; i < nr_pages; i++)
+		status[i] = get_page_node(mm, (unsigned long)pages[i]);
 
 	mmap_read_unlock(mm);
 }
