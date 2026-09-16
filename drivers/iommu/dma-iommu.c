@@ -1526,8 +1526,17 @@ int iommu_dma_map_sg(struct device *dev, struct scatterlist *sg, int nents,
 	 * implementation - it knows better than we do.
 	 */
 	ret = iommu_map_sg(domain, iova, sg, nents, prot, GFP_ATOMIC);
-	if (ret < 0 || ret < iova_len)
+	if (ret < 0)
 		goto out_free_iova;
+	if (ret < iova_len) {
+		/*
+		 * iommu_map_sg() unmaps what it mapped only when a map fails.
+		 * A short count leaves that part in the page table.
+		 */
+		iommu_unmap(domain, iova, ret);
+		ret = -EINVAL;
+		goto out_free_iova;
+	}
 
 	return __finalise_sg(dev, sg, nents, iova);
 
