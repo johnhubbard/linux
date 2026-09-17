@@ -37,7 +37,8 @@ use crate::{
             },
             GspGmcMsgElement,
             MsgFunction,
-            GMCAPI_CMD_GSP_INIT, //
+            GMCAPI_CMD_GSP_INIT,
+            GMCAPI_CMD_GSP_SUSPEND, //
         },
         nvkv::{
             Decoder,
@@ -381,6 +382,18 @@ fn decode_gsp_init_reply(payload_0: &[u8], payload_1: &[u8]) -> Result<GspStatic
 }
 
 pub(crate) use fw::commands::PowerStateLevel;
+
+/// Sends `GSP_SUSPEND`, which GSP-RM does not answer (see [`GMCAPI_CMD_GSP_SUSPEND`]).
+///
+/// # Errors
+///
+/// Errors from [`Cmdq::send_gmc_no_wait`] are propagated as-is.
+#[expect(dead_code)]
+pub(crate) fn gsp_suspend(cmdq: &Cmdq<'_>, level: PowerStateLevel) -> Result {
+    let params = fw::commands::GspSuspend::new(level);
+
+    cmdq.send_gmc_no_wait(GMCAPI_CMD_GSP_SUSPEND, AsBytes::as_bytes(&params), 0)
+}
 
 /// The `UnloadingGuestDriver` command, used to shut down the GSP.
 ///
