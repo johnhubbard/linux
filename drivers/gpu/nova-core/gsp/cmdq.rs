@@ -258,107 +258,69 @@ impl<'a> DmaGspMem<'a> {
         Ok(Self { mem: gsp_mem, bar })
     }
 
-    /// Returns the region of the CPU message queue that the driver is currently allowed to write
-    /// to.
+    /// Returns the region of the CPU message queue that the driver may write to.
     ///
-    /// As the message queue is a circular buffer, the region may be discontiguous in memory. In
-    /// that case the second slice will have a non-zero length.
+    /// The ring wraps, so the region comes as two slices, and the second is empty unless the
+    /// region crosses the end of the ring.
     fn driver_write_area(&mut self) -> (&mut [[u8; GSP_PAGE_SIZE]], &mut [[u8; GSP_PAGE_SIZE]]) {
-        let tx = self.cpu_write_ptr();
-        let rx = self.gsp_read_ptr();
+        let avail = num::u32_as_usize(self.free_slots());
+        let w_slot = num::u32_as_usize(self.cpu_write_ptr());
 
         // Pointer to the first entry of the CPU message queue.
         let data = ptr::project!(mut self.mem.as_mut_ptr(), .cpuq.msgq.data[build: 0]);
 
-        let (tail_end, wrap_end) = if rx == 0 {
-            // The write area is non-wrapping, and stops at the second-to-last entry of the command
-            // queue (to leave the last one empty).
-            (MSGQ_NUM_PAGES - 1, 0)
-        } else if rx <= tx {
-            // The write area wraps and continues until `rx - 1`.
-            (MSGQ_NUM_PAGES, rx - 1)
-        } else {
-            // The write area doesn't wrap and stops at `rx - 1`.
-            (rx - 1, 0)
-        };
-
         // SAFETY:
-        // - `data` was created from a valid pointer, and `rx` and `tx` are in the
-        //   `0..MSGQ_NUM_PAGES` range per the invariants of `cpu_write_ptr` and `gsp_read_ptr`,
-        //   thus the created slices are valid.
-        // - The area starting at `tx` and ending at `rx - 2` modulo `MSGQ_NUM_PAGES`,
-        //   inclusive, belongs to the driver for writing and is not accessed concurrently by
-        //   the GSP.
-        // - The caller holds a reference to `self` for as long as the returned slices are live,
-        //   meaning the CPU write pointer cannot be advanced and thus that the returned area
-        //   remains exclusive to the CPU for the duration of the slices.
-        // - The created slices point to non-overlapping sub-ranges of `data` in all
-        //   branches (in the `rx <= tx` case, the second slice ends at `rx - 1` which is strictly
-        //   less than `tx` where the first slice starts; in the other cases the second slice is
-        //   empty), so creating two `&mut` references from them does not violate aliasing rules.
-        unsafe {
-            (
-                core::slice::from_raw_parts_mut(
-                    data.add(num::u32_as_usize(tx)),
-                    num::u32_as_usize(tail_end - tx),
-                ),
-                core::slice::from_raw_parts_mut(data, num::u32_as_usize(wrap_end)),
-            )
-        }
+        // - `data` points to the `MSGQ_NUM_PAGES` initialized entries of the CPU message queue.
+        // - The returned slices cover the `avail` free slots from the write pointer on, which the
+        //   GSP does not read until `advance_cpu_write_ptr` publishes them.
+        // - `split_at_mut` gives two non-overlapping halves, and the `&mut self` borrow lasts as
+        //   long as the returned slices, so that no other call hands out the same region while
+        //   they live.
+        let data =
+            unsafe { core::slice::from_raw_parts_mut(data, num::u32_as_usize(MSGQ_NUM_PAGES)) };
+        let (before_w, after_w) = data.split_at_mut(w_slot);
+
+        let in_after = avail.min(after_w.len());
+        let in_before = avail - in_after;
+        (&mut after_w[..in_after], &mut before_w[..in_before])
     }
 
-    /// Returns the size of the region of the CPU message queue that the driver is currently allowed
-    /// to write to, in bytes.
-    fn driver_write_area_size(&self) -> usize {
+    /// Returns the number of command queue slots that the driver may still write.
+    fn free_slots(&self) -> u32 {
         let tx = self.cpu_write_ptr();
         let rx = self.gsp_read_ptr();
 
-        // `rx` and `tx` are both in `0..MSGQ_NUM_PAGES` per the invariants of `gsp_read_ptr` and
-        // `cpu_write_ptr`. The minimum value case is where `rx == 0` and `tx == MSGQ_NUM_PAGES -
-        // 1`, which gives `0 + MSGQ_NUM_PAGES - (MSGQ_NUM_PAGES - 1) - 1 == 0`.
-        let slots = (rx + MSGQ_NUM_PAGES - tx - 1) % MSGQ_NUM_PAGES;
-        num::u32_as_usize(slots) * GSP_PAGE_SIZE
+        // One slot always stays empty, so that a full ring and an empty ring differ in their
+        // pointers. `tx` is below `MSGQ_NUM_PAGES`, so the subtraction does not underflow.
+        (rx + MSGQ_NUM_PAGES - tx - 1) % MSGQ_NUM_PAGES
     }
 
-    /// Returns the region of the GSP message queue that the driver is currently allowed to read
-    /// from.
-    ///
-    /// As the message queue is a circular buffer, the region may be discontiguous in memory. In
-    /// that case the second slice will have a non-zero length.
+    /// Returns the number of bytes that the driver can still write to the command queue.
+    fn driver_write_area_size(&self) -> usize {
+        num::u32_as_usize(self.free_slots()) * GSP_PAGE_SIZE
+    }
+
+    /// Returns the region of the GSP message queue that the driver may read, as two slices
+    /// because the ring wraps.
     fn driver_read_area(&self) -> (&[[u8; GSP_PAGE_SIZE]], &[[u8; GSP_PAGE_SIZE]]) {
         let tx = self.gsp_write_ptr();
         let rx = self.cpu_read_ptr();
+        let avail = num::u32_as_usize((tx + MSGQ_NUM_PAGES - rx) % MSGQ_NUM_PAGES);
+        let r_slot = num::u32_as_usize(rx);
 
         // Pointer to the first entry of the GSP message queue.
         let data = ptr::project!(self.mem.as_ptr(), .gspq.msgq.data[build: 0]);
 
-        let (tail_end, wrap_end) = if rx <= tx {
-            // Read area is non-wrapping and stops right before `tx`.
-            (tx, 0)
-        } else {
-            // Read area is wrapping and stops right before `tx`.
-            (MSGQ_NUM_PAGES, tx)
-        };
-
         // SAFETY:
-        // - `data` was created from a valid pointer, and `rx` and `tx` are in the
-        //   `0..MSGQ_NUM_PAGES` range per the invariants of `gsp_write_ptr` and `cpu_read_ptr`,
-        //   thus the created slices are valid.
-        // - The area starting at `rx` and ending at `tx - 1` modulo `MSGQ_NUM_PAGES`,
-        //   inclusive, belongs to the driver for reading and is not accessed concurrently by
-        //   the GSP.
-        // - The caller holds a reference to `self` for as long as the returned slices are live,
-        //   meaning the CPU read pointer cannot be advanced and thus that the returned area
-        //   remains exclusive to the CPU for the duration of the slices.
-        unsafe {
-            (
-                core::slice::from_raw_parts(
-                    data.add(num::u32_as_usize(rx)),
-                    num::u32_as_usize(tail_end - rx),
-                ),
-                core::slice::from_raw_parts(data, num::u32_as_usize(wrap_end)),
-            )
-        }
+        // - `data` points to the `MSGQ_NUM_PAGES` initialized entries of the GSP message queue.
+        // - The returned slices cover the `avail` slots that the GSP has already written. The GSP
+        //   does not write them again until `advance_cpu_read_ptr` releases them.
+        let data = unsafe { core::slice::from_raw_parts(data, num::u32_as_usize(MSGQ_NUM_PAGES)) };
+        let (before_r, after_r) = data.split_at(r_slot);
+
+        let in_after = avail.min(after_r.len());
+        let in_before = avail - in_after;
+        (&after_r[..in_after], &before_r[..in_before])
     }
 
     /// Allocates a region on the command queue that is large enough to send a command of `size`
