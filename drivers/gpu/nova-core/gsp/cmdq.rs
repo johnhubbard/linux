@@ -52,6 +52,7 @@ use crate::{
     driver::Bar0,
     gsp::{
         fw::{
+            GmcCommand,
             GspGmcMsgElement,
             GspMsgElement,
             MsgFunction,
@@ -884,9 +885,9 @@ impl CmdqInner<'_> {
 
         dev_dbg!(
             &self.dev,
-            "GSP GMC: send: seq# {}, command_id=0x{:x}, length=0x{:x}\n",
+            "GSP GMC: send: seq# {}, command={}, length=0x{:x}\n",
             rpc_seq,
-            command_id,
+            GmcCommand(command_id),
             dst.header.length(),
         );
 
@@ -1063,9 +1064,9 @@ impl CmdqInner<'_> {
     fn log_gmc_event(&self, header: &GspGmcMsgElement) {
         dev_warn!(
             &self.dev,
-            "GSP GMC: dropping unclaimed message (seq {}, command_id=0x{:x})\n",
+            "GSP GMC: dropping unclaimed message (seq {}, command={})\n",
             header.gmc.sequence,
-            header.gmc.command_id(),
+            GmcCommand(header.gmc.command_id()),
         );
     }
 
@@ -1269,9 +1270,9 @@ impl CmdqInner<'_> {
             ),
             QueueElement::Gmc(message) => dev_dbg!(
                 &self.dev,
-                "GSP GMC: receive: seq# {}, command_id=0x{:x}, length=0x{:x}\n",
+                "GSP GMC: receive: seq# {}, command={}, length=0x{:x}\n",
                 message.header.gmc.sequence,
-                message.header.gmc.command_id(),
+                GmcCommand(message.header.gmc.command_id()),
                 message.header.length(),
             ),
         }

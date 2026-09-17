@@ -42,6 +42,7 @@ use crate::{
         cmdq::Cmdq,
         commands,
         fw::{
+            GmcCommand,
             GspArgumentsPadded,
             GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER,
             GMCAPI_CMD_EXEC_HS_BINARY, //
@@ -169,8 +170,8 @@ impl LoadExecContext<'_, '_> {
             _ => {
                 dev_err!(
                     self.dev,
-                    "Unexpected GMC boot event: command_id={:#010x}\n",
-                    command_id
+                    "Unexpected GMC boot event: command={}\n",
+                    GmcCommand(command_id)
                 );
                 return Err(EINVAL);
             }
@@ -179,8 +180,8 @@ impl LoadExecContext<'_, '_> {
         handled.and_then(|()| self.core_resume()).inspect_err(|e| {
             dev_err!(
                 self.dev,
-                "GMC boot event {:#010x} failed: {:?}\n",
-                command_id,
+                "GMC boot event {} failed: {:?}\n",
+                GmcCommand(command_id),
                 e
             );
         })
