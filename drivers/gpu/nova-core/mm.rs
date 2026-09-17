@@ -308,7 +308,7 @@ pub(crate) mod selftest {
     pub(crate) fn run(
         dev: &device::Device<device::Bound>,
         mm: &mut GpuMm<'_>,
-        usable_fb_regions: &[Range<u64>],
+        mut usable_fb_regions: impl Iterator<Item = Range<u64>>,
         bar_user: &Arc<bar_user::BarUser<'_>>,
         bar1_pdb: u64,
         chipset: Chipset,
@@ -316,7 +316,7 @@ pub(crate) mod selftest {
         // VRAM span the self-tests are free to overwrite, from the chosen test base.
         const SELFTEST_SPAN: u64 = u64::SZ_64M;
 
-        let base = usable_fb_regions.iter().find_map(|region| {
+        let base = usable_fb_regions.find_map(|region| {
             // Tests rely on this being 8 byte aligned for checking misalignment handling.
             let base = region.start.align_up(Alignment::new::<8>())?;
             (base.checked_add(SELFTEST_SPAN)? <= region.end).then_some(base)

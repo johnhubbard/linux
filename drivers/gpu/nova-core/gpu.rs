@@ -465,16 +465,16 @@ impl<'gpu> Gpu<'gpu> {
                     Err(e) => dev_warn!(dev, "GPU name unavailable: {:?}\n", e),
                 }
 
-                if !info.usable_fb_regions.is_empty() {
+                if info.usable_fb_regions().next().is_some() {
                     dev_dbg!(dev, "Usable FB regions:\n");
-                    for region in &info.usable_fb_regions {
+                    for region in info.usable_fb_regions() {
                         dev_dbg!(dev, "  - {:#x?}\n", region);
                     }
 
                     dev_dbg!(
                         dev,
                         "Total usable VRAM: {} MiB\n",
-                        info.usable_fb_regions.iter().fold(0u64, |res, region| res
+                        info.usable_fb_regions().fold(0u64, |res, region| res
                             .saturating_add(region.end - region.start))
                             / u64::SZ_1M
                     );
@@ -484,7 +484,7 @@ impl<'gpu> Gpu<'gpu> {
             // Create GPU memory manager owning memory management resources.
             mm: {
                 let info = gsp_resources.static_info();
-                let usable_vram = info.usable_fb_regions.first().ok_or(ENODEV)?;
+                let usable_vram = info.usable_fb_regions().next().ok_or(ENODEV)?;
                 let buddy_params = GpuBuddyParams {
                     base_offset: usable_vram.start,
                     size: usable_vram.end - usable_vram.start,
@@ -495,13 +495,13 @@ impl<'gpu> Gpu<'gpu> {
                     bar,
                     gsp_resources.spec.chipset,
                     buddy_params,
-                    VramAddress::from_raw(info.total_fb_end),
+                    VramAddress::from_raw(info.total_fb_end().ok_or(ENODEV)?),
                 )?
             },
 
             // Create BAR1 user interface for CPU access to GPU virtual memory.
             bar_user: {
-                let pdb_addr = VramAddress::from_raw(gsp_resources.static_info().bar1_pde_base);
+                let pdb_addr = VramAddress::from_raw(gsp_resources.static_info().bar1_pde_base());
                 let bar1_idx = crate::driver::bar1_resource_index(pdev)?;
                 let bar1_size = pdev.resource_len(bar1_idx)?;
                 Arc::pin_init(
@@ -527,9 +527,9 @@ impl<'gpu> Gpu<'gpu> {
         if let Err(err) = crate::mm::selftest::run(
             dev,
             this.mm,
-            &info.usable_fb_regions,
+            info.usable_fb_regions(),
             this.bar_user,
-            info.bar1_pde_base,
+            info.bar1_pde_base(),
             this.spec.chipset,
         ) {
             dev_err!(dev, "self-tests failed: {:?}\n", err);
