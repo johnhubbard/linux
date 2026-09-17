@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
-use core::ops::Range;
+use core::{
+    ffi::FromBytesUntilNulError,
+    ops::Range,
+    str::Utf8Error, //
+};
 
 use kernel::{
     alloc::ArrayVec,
@@ -288,9 +292,9 @@ impl GspInitRequest {
 // Should decode with UnknownKeyPolicy::Ignore.
 nvkv_decode! {
     /// Schema for the `GSP_INIT` response.
-    pub(crate) struct GspInitResponseSchema => GspInitResponse {
+    pub(crate) struct GspInitResponseSchema => GspStaticInfo {
         gpu_name:
-            Array<u8, { GspInitResponse::MAX_GPU_NAME_LEN }, { Self::GPU_NAME_STRING_KEY }>,
+            Array<u8, { GspStaticInfo::MAX_GPU_NAME_LEN }, { Self::GPU_NAME_STRING_KEY }>,
         fb_regions: Accumulated<FbRegionSchema>,
         bar1_pde_base: Required<u64, { Self::BAR1_PDE_BASE_KEY }>,
         vmmu_segment_size: Key<u64, { Self::VMMU_SEGMENT_SIZE_KEY }>,
@@ -304,8 +308,8 @@ impl GspInitResponseSchema {
     const VMMU_SEGMENT_SIZE_KEY: KeyId = 0x1050;
 }
 
-/// Payload of the `GSP_INIT` response.
-pub(crate) struct GspInitResponse {
+/// The static GPU configuration, as decoded from the `GSP_INIT` reply.
+pub(crate) struct GspStaticInfo {
     gpu_name: ArrayVec<u8, { Self::MAX_GPU_NAME_LEN }>,
     fb_regions: KVVec<FbRegion>,
     bar1_pde_base: u64,
@@ -313,16 +317,35 @@ pub(crate) struct GspInitResponse {
     vmmu_segment_size: u64,
 }
 
-impl GspInitResponse {
+/// Error type for [`GspStaticInfo::gpu_name`].
+#[derive(Debug)]
+pub(crate) enum GpuNameError {
+    /// The GPU name string does not contain a NUL terminator.
+    NoNullTerminator(FromBytesUntilNulError),
+
+    /// The GPU name string contains invalid UTF-8.
+    #[expect(dead_code)]
+    InvalidUtf8(Utf8Error),
+}
+
+impl GspStaticInfo {
     pub(crate) const MAX_GPU_NAME_LEN: usize = 64;
 
     /// Tag of a general-purpose region. Any other tag marks a region that GSP-RM reserves for the
     /// use that the tag names.
     const FB_REGION_TAG_NONE: u32 = 0;
 
-    /// Returns the GPU name, which GSP-RM sends with its NUL terminator.
-    pub(crate) fn gpu_name(&self) -> &[u8] {
-        self.gpu_name.as_slice()
+    /// Returns the name of the GPU as a string.
+    ///
+    /// # Errors
+    ///
+    /// - [`GpuNameError::NoNullTerminator`] if the name that GSP-RM sent has no NUL terminator.
+    /// - [`GpuNameError::InvalidUtf8`] if the name is not valid UTF-8.
+    pub(crate) fn gpu_name(&self) -> core::result::Result<&str, GpuNameError> {
+        CStr::from_bytes_until_nul(self.gpu_name.as_slice())
+            .map_err(GpuNameError::NoNullTerminator)?
+            .to_str()
+            .map_err(GpuNameError::InvalidUtf8)
     }
 
     /// Returns an iterator over the FB regions from which the driver may allocate: the
