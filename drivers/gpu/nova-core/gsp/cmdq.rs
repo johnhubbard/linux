@@ -915,12 +915,8 @@ impl CmdqInner<'_> {
 
     /// Receives a message from the GSP.
     ///
-    /// A message whose function code is `M::FUNCTION` is decoded and returned. Any other message
-    /// is logged as an event.
-    ///
-    /// With `expected_seq` set, the message must carry that RPC sequence number too. A message
-    /// with the expected function code and a different sequence is a stale reply to a command
-    /// that already timed out, so it is logged and dropped rather than classified as an event.
+    /// [`Self::match_rpc_reply`] decodes the message as the awaited reply of type `M`, or logs it.
+    /// `expected_seq` narrows the match.
     ///
     /// The read pointer advances past the message in every case, including a decode failure.
     ///
@@ -942,13 +938,48 @@ impl CmdqInner<'_> {
         Error: From<M::InitError>,
     {
         let message = self.wait_for_msg(timeout)?;
+
+        // An early return here would leave the read pointer on this message.
+        let result = self.match_rpc_reply::<M>(&message, expected_seq);
+
+        // Advance the read pointer past this message.
+        self.gsp_mem.advance_cpu_read_ptr(u32::try_from(
+            message.header.length().div_ceil(GSP_PAGE_SIZE),
+        )?);
+
+        result
+    }
+
+    /// Decodes `message` as the awaited reply of type `M`, or logs it.
+    ///
+    /// A message whose function code is `M::FUNCTION` is decoded and returned. Any other message
+    /// is logged as an event.
+    ///
+    /// With `expected_seq` set, the message must carry that RPC sequence number too. A message
+    /// with the expected function code and a different sequence is a stale reply to a command
+    /// that already timed out, so it is logged as stale rather than as an event.
+    ///
+    /// # Errors
+    ///
+    /// - `EIO` if the matched message is too short for `M::Message`.
+    /// - `ENOMSG` if the message is not the awaited reply.
+    ///
+    /// Error codes returned by [`MessageFromGsp::read`] are propagated as-is.
+    fn match_rpc_reply<M: MessageFromGsp>(
+        &self,
+        message: &GspMessage<'_>,
+        expected_seq: Option<u32>,
+    ) -> Result<M>
+    where
+        // This allows all error types, including `Infallible`, to be used for `M::InitError`.
+        Error: From<M::InitError>,
+    {
         let function = message.header.function();
         let seq = message.header.sequence();
         let func_matches = matches!(function, Ok(f) if f == M::FUNCTION);
         let matched = func_matches && expected_seq.is_none_or(|expected| seq == expected);
 
-        // An early return here would leave the read pointer on this message.
-        let result = if matched {
+        if matched {
             match M::Message::from_bytes_prefix(message.contents.0) {
                 Some((cmd, contents_1)) => {
                     let mut sbuffer = SBufferIter::new_reader([contents_1, message.contents.1]);
@@ -984,20 +1015,13 @@ impl CmdqInner<'_> {
             }
 
             Err(ENOMSG)
-        };
-
-        // Advance the read pointer past this message.
-        self.gsp_mem.advance_cpu_read_ptr(u32::try_from(
-            message.header.length().div_ceil(GSP_PAGE_SIZE),
-        )?);
-
-        result
+        }
     }
 
     /// Receives a message of type `M`, waiting up to [`Cmdq::RECEIVE_TIMEOUT`] from the call.
     ///
     /// Any other message that arrives first is logged as an event and does not extend the
-    /// deadline. `expected_seq` narrows the match as [`Self::receive_msg`] describes.
+    /// deadline. `expected_seq` narrows the match as [`Self::match_rpc_reply`] describes.
     ///
     /// # Errors
     ///
