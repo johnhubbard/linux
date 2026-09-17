@@ -1062,10 +1062,17 @@ impl CmdqInner<'_> {
     /// Logs a GMC message that no caller is waiting for: a response to a request that has already
     /// timed out, or an event that arrives outside the boot sequence.
     fn log_gmc_event(&self, header: &GspGmcMsgElement) {
+        let kind = if header.gmc.is_response() {
+            "response"
+        } else {
+            "event"
+        };
+
         dev_warn!(
             &self.dev,
-            "GSP GMC: dropping unclaimed message (seq {}, command={})\n",
-            header.gmc.sequence,
+            "GSP GMC: dropping unclaimed {} (seq# {}, command={})\n",
+            kind,
+            header.gmc.sequence_number(),
             GmcCommand(header.gmc.command_id()),
         );
     }
@@ -1268,13 +1275,23 @@ impl CmdqInner<'_> {
                 message.header.function(),
                 message.header.length(),
             ),
-            QueueElement::Gmc(message) => dev_dbg!(
-                &self.dev,
-                "GSP GMC: receive: seq# {}, command={}, length=0x{:x}\n",
-                message.header.gmc.sequence,
-                GmcCommand(message.header.gmc.command_id()),
-                message.header.length(),
-            ),
+            QueueElement::Gmc(message) => {
+                let gmc = &message.header.gmc;
+                let kind = if gmc.is_response() {
+                    "response"
+                } else {
+                    "event"
+                };
+
+                dev_dbg!(
+                    &self.dev,
+                    "GSP GMC: {}: seq# {}, command={}, length=0x{:x}\n",
+                    kind,
+                    gmc.sequence_number(),
+                    GmcCommand(gmc.command_id()),
+                    message.header.length(),
+                )
+            }
         }
 
         let result = f(self, element);
