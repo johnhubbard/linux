@@ -31,6 +31,7 @@ use crate::{
             FwsecCommand,
             FwsecFirmware, //
         },
+        gen_bootloader::GenericBootloader,
         gsp::GspFirmware, //
     },
     gpu::Chipset,
@@ -314,6 +315,19 @@ impl GspHal for Tu102 {
         )?;
 
         Ok(unload_guard.dismiss())
+    }
+
+    fn generic_bootloader(
+        &self,
+        dev: &device::Device<device::Bound>,
+        chipset: Chipset,
+        imem_size: usize,
+    ) -> Result<Option<GenericBootloader>> {
+        if !self.needs_fwsec_bootloader {
+            return Ok(None);
+        }
+
+        GenericBootloader::new(dev, chipset, imem_size).map(Some)
     }
 
     fn post_boot(
