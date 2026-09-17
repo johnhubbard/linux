@@ -1095,6 +1095,10 @@ pub(crate) const GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER: u32 =
 pub(crate) const GMCAPI_CMD_EXEC_HS_BINARY: u32 =
     r000_00::GMCAPI_COMMANDS_GMCAPI_CMD_EXEC_HS_BINARY;
 
+/// GMC request for GSP-RM to suspend. GSP-RM sends no response, and reports the completed
+/// suspend in the GSP falcon's `MAILBOX0` instead.
+pub(crate) const GMCAPI_CMD_GSP_SUSPEND: u32 = r000_00::GMCAPI_COMMANDS_GMCAPI_CMD_GSP_SUSPEND;
+
 static_assert!(size_of::<GmcApiHeader>() == size_of::<r000_00::GMCAPI_HEADER>());
 static_assert!(
     core::mem::offset_of!(GmcApiHeader, command)
