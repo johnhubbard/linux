@@ -362,7 +362,7 @@ impl<'gsp> super::Gsp<'gsp> {
         let dev = pdev.as_ref();
         let hal = super::hal::gsp_hal(chipset);
 
-        let gsp_fw = KBox::pin_init(GspFirmware::new(dev, chipset), GFP_KERNEL)?;
+        let gsp_fw = KBox::pin_init(GspFirmware::new(dev, chipset, &self.gsp_tlv), GFP_KERNEL)?;
 
         let generic_bootloader = hal.generic_bootloader(dev, chipset, gsp_falcon.imem_size())?;
 
