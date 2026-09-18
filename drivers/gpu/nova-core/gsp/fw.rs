@@ -729,6 +729,10 @@ const GMCAPI_COMMAND_ID_MASK: u32 = 0x00ff_ffff;
 /// Flag bit of [`GmcApiHeader::command`] that GSP-RM sets on a response.
 const GMCAPI_COMMAND_FLAGS_RESPONSE: u32 = 0x0100_0000;
 
+/// First sequence number of the space that GSP-RM numbers its events from, so that an event's
+/// number cannot collide with a request's. Requests are numbered from zero.
+const GMC_EVENT_SEQUENCE_BASE: u64 = 1 << 63;
+
 /// GMC request that carries the system information and registry keys to GSP-RM. GSP-RM answers
 /// it with the static GPU configuration once it has finished starting.
 pub(crate) const GMCAPI_CMD_GSP_INIT: u32 = bindings::GMCAPI_COMMANDS_GMCAPI_CMD_GSP_INIT;
@@ -776,8 +780,13 @@ impl GmcApiHeader {
     }
 
     /// Returns `true` if GSP-RM sent this header as a response rather than an event.
-    fn is_response(&self) -> bool {
+    pub(crate) fn is_response(&self) -> bool {
         self.command & GMCAPI_COMMAND_FLAGS_RESPONSE != 0
+    }
+
+    /// Returns the sequence number without the bit that marks an event's sequence space.
+    pub(crate) fn sequence_number(&self) -> u64 {
+        self.sequence & !GMC_EVENT_SEQUENCE_BASE
     }
 
     /// Returns the `NV_STATUS` that a response carries.
