@@ -585,13 +585,12 @@ the command's sequence number on every reply. On r570 the reply to
 ``UnloadingGuestDriver`` carries sequence 0.
 
 The read pointer advances past every message that passes framing validation,
-whether it matched or was an event. A matched message that is too short to
-decode is the exception, and it stays at the queue head.
+whether it matched, was an event, or matched but failed to decode, so a message
+is never left at the queue head for the next receive to parse again.
 
 An element that fails framing validation has no trustworthy length, so the
-read pointer cannot advance past it. Such an element also stays at the queue
-head, and every later receive fails on it with ``EIO`` until the device is
-reset.
+read pointer cannot advance past it. Such an element stays at the queue head,
+and every later receive fails on it with ``EIO`` until the device is reset.
 
 The polling path and the IRQ thread both read the queue under the command-queue
 mutex. Replies and events share one queue and one read pointer, so one lock is
