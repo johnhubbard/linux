@@ -102,6 +102,8 @@ impl pci::Driver for NovaCoreDriver {
     ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
         try_pin_init!(NovaCore {
             _: {
+                dev_dbg!(pdev, "Probe Nova Core GPU driver.\n");
+
                 pdev.enable_device_mem()?;
                 pdev.set_master();
             },
