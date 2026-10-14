@@ -13,23 +13,20 @@ use kernel::{
         DmaAddress, //
     },
     firmware,
-    fs::file,
-    io::{
-        io_project,
-        io_write,
-        Io, //
-    },
+    io::io_write,
     pci,
-    prelude::*,
-    transmute::AsBytes,
-    uaccess::UserSliceWriter, //
+    prelude::*, //
 };
 
 pub(crate) mod cmdq;
 pub(crate) mod commands;
 mod fw;
+mod logbuffer;
 mod nvkv;
 mod regs;
+
+use logbuffer::LogBuffers;
+pub(crate) use logbuffer::RetainedLogs;
 
 pub(crate) use fw::{
     GspFmcBootParams,
@@ -47,10 +44,7 @@ use crate::{
         Falcon, //
     },
     firmware::{
-        gsp::{
-            BuildId,
-            BUILD_ID_MAX_LENGTH, //
-        },
+        gsp::BuildId,
         tlv::{
             request_tlv,
             Tlv, //
@@ -94,9 +88,6 @@ impl<'ctx, 'gpu> GspBootContext<'ctx, 'gpu> {
     }
 }
 
-/// Number of GSP pages to use in a RM log buffer.
-const RM_LOG_BUFFER_NUM_PAGES: usize = 0x10;
-
 /// Array of page table entries, as understood by the GSP bootloader.
 #[repr(C)]
 #[derive(FromBytes, IntoBytes)]
@@ -114,248 +105,6 @@ impl<const NUM_PAGES: usize> PteArray<NUM_PAGES> {
         }
 
         Ok(())
-    }
-}
-
-/// Longest task name in a log dump header, matching Open RM's `TASK_NAME_MAX_LENGTH`.
-const TASK_NAME_MAX_LENGTH: usize = 8;
-
-/// Header ahead of the log data in a debugfs dump, in the layout of Open RM's
-/// `LIBOS_LOG_NVLOG_BUFFER_V2`.
-///
-/// The decoder uses the header only when `build_id` matches the build ID of its GSP firmware ELF.
-#[repr(C)]
-struct LogBufferHeader {
-    /// Architecture code of the GPU, from the `NV_PMC_BOOT_42` architecture field.
-    gpu_arch: u32,
-    /// Implementation number of the GPU within its architecture.
-    gpu_impl: u32,
-    version: u32,
-    /// Number of valid bytes in `build_id`.
-    build_id_length: u32,
-    /// Name of the LIBOS3 task, printed ahead of each decoded line.
-    task_prefix: [u8; TASK_NAME_MAX_LENGTH],
-    /// Value that the decoder adds to each timestamp, zero when unknown.
-    local_to_global_timer_delta: u64,
-    /// Build ID of the GSP firmware, zero-padded.
-    build_id: [u8; BUILD_ID_MAX_LENGTH],
-    /// `LIBOS_LOG_NVLOG_BUFFER_FLAG_*` bits.
-    flags: u32,
-    reserved: u32,
-}
-
-// SAFETY: `LogBufferHeader` is `repr(C)`, its integer and byte array fields leave no padding
-// between or after them, and it has no interior mutability.
-unsafe impl AsBytes for LogBufferHeader {}
-
-impl LogBufferHeader {
-    /// The `LIBOS_LOG_NVLOG_BUFFER_V2` layout.
-    const VERSION: u32 = 2;
-    /// `LIBOS_LOG_NVLOG_BUFFER_FLAG_PACKED_METADATA`: each log entry packs its argument count and
-    /// task id into the word that holds its metadata address.
-    const FLAG_PACKED_METADATA: u32 = 0x1;
-
-    /// Builds the header for a dump of the `task_prefix` task's log, on the GPU that `spec`
-    /// describes, whose GSP runs the firmware with `build_id`.
-    fn new(spec: Spec, build_id: &BuildId, task_prefix: &str) -> Self {
-        let mut header = Self {
-            gpu_arch: spec.chipset.arch() as u32,
-            gpu_impl: u32::from(spec.implementation),
-            version: Self::VERSION,
-            build_id_length: build_id.len(),
-            task_prefix: [0; TASK_NAME_MAX_LENGTH],
-            local_to_global_timer_delta: 0,
-            build_id: *build_id.padded(),
-            flags: Self::FLAG_PACKED_METADATA,
-            reserved: 0,
-        };
-
-        // The last byte stays zero, so that the name is NUL-terminated for the decoder.
-        let prefix = task_prefix.as_bytes();
-        let len = prefix.len().min(TASK_NAME_MAX_LENGTH - 1);
-        header.task_prefix[..len].copy_from_slice(&prefix[..len]);
-
-        header
-    }
-}
-
-/// The logging buffers are byte queues that contain encoded printf-like
-/// messages from GSP-RM.  They need to be decoded by a special application
-/// that can parse the buffers.
-///
-/// The 'loginit' buffer contains logs from early GSP-RM init and
-/// exception dumps.  The 'logrm' buffer contains the subsequent logs. Both are
-/// written to directly by GSP-RM and can be any multiple of GSP_PAGE_SIZE.
-///
-/// The physical address map for the log buffer is stored in the buffer
-/// itself, starting with offset 1. Offset 0 contains the "put" pointer (pp).
-/// Initially, pp is equal to 0. If the buffer has valid logging data in it,
-/// then pp points to index into the buffer where the next logging entry will
-/// be written. Therefore, the logging data is valid if:
-///   1 <= pp < sizeof(buffer)/sizeof(u64)
-struct LogBuffer<'a, const NUM_PAGES: usize> {
-    /// Header that a debugfs dump carries ahead of the data, present when the GSP firmware's
-    /// build ID is known.
-    header: Option<LogBufferHeader>,
-    /// The buffer that GSP-RM logs into.
-    buffer: Coherent<'a, [[u8; GSP_PAGE_SIZE]; NUM_PAGES]>,
-}
-
-/// A log buffer at the default size, [`RM_LOG_BUFFER_NUM_PAGES`] pages.
-///
-/// Matches the registry defaults for the init, interrupt, RM and MNOC tasks
-/// (`NV_REG_STR_RM_GSP_LOG_BUFFER_SIZE_TASK_*_DEFAULT`).
-type TaskLogBuffer<'a> = LogBuffer<'a, RM_LOG_BUFFER_NUM_PAGES>;
-
-/// A single-page log buffer, the size of the logs of the root task and of the RM state monitor
-/// task.
-type SmallLogBuffer<'a> = LogBuffer<'a, 1>;
-
-impl<'a, const NUM_PAGES: usize> LogBuffer<'a, NUM_PAGES> {
-    /// Creates a new `LogBuffer` mapped on `dev`, whose debugfs dump opens with `header`.
-    fn new(
-        dev: &'a device::Device<device::Bound>,
-        header: Option<LogBufferHeader>,
-    ) -> Result<Self> {
-        let buffer = Coherent::zeroed(dev, GFP_KERNEL)?;
-
-        let start_addr = buffer.dma_address();
-
-        let pte_view = io_project!(
-            buffer,
-            [build: 0][build: size_of::<u64>()..][build: ..NUM_PAGES * size_of::<u64>()]
-        )
-        .try_cast::<PteArray<NUM_PAGES>>()?;
-        PteArray::init(pte_view, start_addr)?;
-
-        Ok(Self { header, buffer })
-    }
-}
-
-impl<const NUM_PAGES: usize> debugfs::BinaryWriter for LogBuffer<'_, NUM_PAGES> {
-    fn write_to_slice(
-        &self,
-        writer: &mut UserSliceWriter,
-        offset: &mut file::Offset,
-    ) -> Result<usize> {
-        if offset.is_negative() {
-            return Err(EINVAL);
-        }
-
-        // An offset too large for a `usize` is past the end of the dump.
-        let Ok(offset_val) = usize::try_from(*offset) else {
-            return Ok(0);
-        };
-
-        let header = self
-            .header
-            .as_ref()
-            .map_or(&[][..], |header| header.as_bytes());
-        let total = header.len() + self.buffer.size();
-        if offset_val >= total {
-            return Ok(0);
-        }
-
-        let count = (total - offset_val).min(writer.len());
-        let mut written = 0;
-
-        // The header comes first, and a read that reaches past it continues in the buffer.
-        if let Some(header_rest) = header.get(offset_val..) {
-            written = header_rest.len().min(count);
-            writer.write_slice(&header_rest[..written])?;
-        }
-        if written < count {
-            let buffer_offset = offset_val + written - header.len();
-            writer.write_dma(&self.buffer, buffer_offset, count - written)?;
-            written = count;
-        }
-
-        *offset += i64::try_from(written)?;
-        Ok(written)
-    }
-}
-
-/// The log buffers to which GSP-RM writes its debug output, one per LIBOS3 task.
-struct LogBuffers<'a> {
-    /// Init task.
-    loginit: TaskLogBuffer<'a>,
-    /// Interrupt task.
-    logintr: TaskLogBuffer<'a>,
-    /// RM task.
-    logrm: TaskLogBuffer<'a>,
-    /// MNOC task.
-    logmnoc: TaskLogBuffer<'a>,
-    /// Root task.
-    logroot: SmallLogBuffer<'a>,
-    /// RM state monitor task.
-    logrmon: SmallLogBuffer<'a>,
-}
-
-impl<'a> LogBuffers<'a> {
-    /// Number of log buffers.
-    const COUNT: usize = 6;
-
-    /// Allocates the six log buffers, mapped on `dev`, and gives each one the dump header for
-    /// the GPU that `spec` describes when `build_id` is known.
-    fn new(
-        dev: &'a device::Device<device::Bound>,
-        spec: Spec,
-        build_id: Option<&BuildId>,
-    ) -> Result<Self> {
-        let header = |task_prefix| build_id.map(|id| LogBufferHeader::new(spec, id, task_prefix));
-
-        Ok(Self {
-            loginit: TaskLogBuffer::new(dev, header("INIT"))?,
-            logintr: TaskLogBuffer::new(dev, header("INTR"))?,
-            logrm: TaskLogBuffer::new(dev, header("RM"))?,
-            logmnoc: TaskLogBuffer::new(dev, header("MNOC"))?,
-            logroot: SmallLogBuffer::new(dev, header("ROOT"))?,
-            logrmon: SmallLogBuffer::new(dev, header("RMON"))?,
-        })
-    }
-
-    /// Fills the first [`Self::COUNT`] entries of `libos` with the log buffers, under the names
-    /// that GSP-RM looks them up by.
-    fn init_arguments(
-        &self,
-        libos: &mut CoherentBox<'_, [LibosMemoryRegionInitArgument]>,
-    ) -> Result {
-        libos.init_at(
-            0,
-            LibosMemoryRegionInitArgument::new("LOGINIT", &self.loginit.buffer),
-        )?;
-        libos.init_at(
-            1,
-            LibosMemoryRegionInitArgument::new("LOGINTR", &self.logintr.buffer),
-        )?;
-        libos.init_at(
-            2,
-            LibosMemoryRegionInitArgument::new("LOGRM", &self.logrm.buffer),
-        )?;
-        libos.init_at(
-            3,
-            LibosMemoryRegionInitArgument::new("LOGMNOC", &self.logmnoc.buffer),
-        )?;
-        libos.init_at(
-            4,
-            LibosMemoryRegionInitArgument::new("LOGROOT", &self.logroot.buffer),
-        )?;
-        libos.init_at(
-            5,
-            LibosMemoryRegionInitArgument::new("LOGRMON", &self.logrmon.buffer),
-        )?;
-
-        Ok(())
-    }
-
-    /// Exposes each log buffer as a binary file in `dir`, under the lowercase form of its name.
-    fn register_debugfs<'data>(&'data self, dir: &debugfs::ScopedDir<'data, '_>) {
-        dir.read_binary_file(c"loginit", &self.loginit);
-        dir.read_binary_file(c"logintr", &self.logintr);
-        dir.read_binary_file(c"logrm", &self.logrm);
-        dir.read_binary_file(c"logmnoc", &self.logmnoc);
-        dir.read_binary_file(c"logroot", &self.logroot);
-        dir.read_binary_file(c"logrmon", &self.logrmon);
     }
 }
 
@@ -423,13 +172,7 @@ impl<'gsp> Gsp<'gsp> {
 
                     libos.into()
                 },
-                logs <- {
-                    let log_parent: &debugfs::Dir = crate::debugfs_data(dev).root();
-
-                    log_parent.scope(log_buffers, dev.name(), |logs, dir| {
-                        logs.register_debugfs(dir)
-                    })
-                },
+                logs <- log_buffers.scope(),
             }))
         })
     }
