@@ -935,12 +935,10 @@ bitfield! {
 /// In a queue element, it follows the queue element header and precedes the payload of the
 /// command.
 #[repr(transparent)]
-#[expect(dead_code)]
 pub(crate) struct GmcApiHeader {
     inner: r000_00::GMCAPI_HEADER,
 }
 
-#[expect(dead_code)]
 impl GmcApiHeader {
     /// Creates the header of a request for `command`, sent with sequence number `sequence` and
     /// followed by `payload_size` bytes of payload.
