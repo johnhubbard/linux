@@ -30,6 +30,49 @@ impl<T> ::core::fmt::Debug for __IncompleteArrayField<T> {
         fmt.write_str("__IncompleteArrayField")
     }
 }
+#[repr(C)]
+pub struct __BindgenUnionField<T>(::core::marker::PhantomData<T>);
+impl<T> __BindgenUnionField<T> {
+    #[inline]
+    pub const fn new() -> Self {
+        __BindgenUnionField(::core::marker::PhantomData)
+    }
+    #[inline]
+    pub unsafe fn as_ref(&self) -> &T {
+        ::core::mem::transmute(self)
+    }
+    #[inline]
+    pub unsafe fn as_mut(&mut self) -> &mut T {
+        ::core::mem::transmute(self)
+    }
+}
+impl<T> ::core::default::Default for __BindgenUnionField<T> {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl<T> ::core::clone::Clone for __BindgenUnionField<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> ::core::marker::Copy for __BindgenUnionField<T> {}
+impl<T> ::core::fmt::Debug for __BindgenUnionField<T> {
+    fn fmt(&self, fmt: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        fmt.write_str("__BindgenUnionField")
+    }
+}
+impl<T> ::core::hash::Hash for __BindgenUnionField<T> {
+    fn hash<H: ::core::hash::Hasher>(&self, _state: &mut H) {}
+}
+impl<T> ::core::cmp::PartialEq for __BindgenUnionField<T> {
+    fn eq(&self, _other: &__BindgenUnionField<T>) -> bool {
+        true
+    }
+}
+impl<T> ::core::cmp::Eq for __BindgenUnionField<T> {}
 pub type __u8 = ffi::c_uchar;
 pub type __u16 = ffi::c_ushort;
 pub type __u32 = ffi::c_uint;
@@ -38,6 +81,60 @@ pub type u8_ = __u8;
 pub type u16_ = __u16;
 pub type u32_ = __u32;
 pub type u64_ = __u64;
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone, MaybeZeroable)]
+pub struct GSP_MSG_QUEUE_ENCRYPTION_TAG {
+    pub authTagBuffer: [u8_; 16usize],
+}
+#[repr(C)]
+#[derive(MaybeZeroable)]
+pub struct GSP_MSG_QUEUE_ELEMENT {
+    pub mctpMagic: u32_,
+    pub mctpPayloadSize: u32_,
+    pub mctpHeader: u32_,
+    pub nvdmHeader: u32_,
+    pub __bindgen_anon_1: GSP_MSG_QUEUE_ELEMENT__bindgen_ty_1,
+}
+#[repr(C)]
+#[derive(MaybeZeroable)]
+pub struct GSP_MSG_QUEUE_ELEMENT__bindgen_ty_1 {
+    pub withEncryption: __BindgenUnionField<GSP_MSG_QUEUE_ELEMENT__bindgen_ty_1__bindgen_ty_1>,
+    pub noEncryption: __BindgenUnionField<GSP_MSG_QUEUE_ELEMENT__bindgen_ty_1__bindgen_ty_2>,
+    pub bindgen_union_field: [u32; 6usize],
+}
+#[repr(C)]
+#[derive(Debug, Default, MaybeZeroable)]
+pub struct GSP_MSG_QUEUE_ELEMENT__bindgen_ty_1__bindgen_ty_1 {
+    pub encryptionTag: GSP_MSG_QUEUE_ENCRYPTION_TAG,
+    pub nvdmPayloadSize: u32_,
+    pub reserved: u32_,
+    pub payload: __IncompleteArrayField<u8_>,
+}
+#[repr(C)]
+#[derive(Debug, Default, MaybeZeroable)]
+pub struct GSP_MSG_QUEUE_ELEMENT__bindgen_ty_1__bindgen_ty_2 {
+    pub nvdmPayloadSize: u32_,
+    pub reserved: u32_,
+    pub payload: __IncompleteArrayField<u8_>,
+}
+impl Default for GSP_MSG_QUEUE_ELEMENT__bindgen_ty_1 {
+    fn default() -> Self {
+        let mut s = ::core::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::core::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+impl Default for GSP_MSG_QUEUE_ELEMENT {
+    fn default() -> Self {
+        let mut s = ::core::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::core::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
 #[repr(C)]
 #[derive(MaybeZeroable)]
 pub struct GMCAPI_HEADER {
