@@ -13,10 +13,19 @@ use crate::{
         gsp::Gsp,
         Falcon, //
     },
-    firmware::gsp::GspFirmware,
+    firmware::{
+        bindata::UcodesImage,
+        gsp::GspFirmware, //
+    },
     gsp::{
         cmdq::Cmdq,
-        commands, //
+        commands::gmc::{
+            GspInit,
+            GspSuspend,
+            PowerStateLevel, //
+        },
+        fw::GspArgumentsPadded,
+        load_exec, //
     },
 };
 
@@ -29,6 +38,11 @@ impl<'gsp> super::Gsp<'gsp> {
     ///
     /// Returns, with the GSP running, the static configuration that GSP-RM reported and the
     /// unload bundle for [`Self::unload`].
+    ///
+    /// # Errors
+    ///
+    /// - `ENOENT` if the ucodes image is not installed.
+    /// - `EIO` if GSP-RM answers `GSP_INIT` with an error status.
     pub(crate) fn boot(
         self: Pin<&mut Self>,
         mut ctx: super::GspBootContext<'_, 'gsp>,
@@ -41,14 +55,12 @@ impl<'gsp> super::Gsp<'gsp> {
 
         let gsp_fw = KBox::pin_init(GspFirmware::new(dev, chipset), GFP_KERNEL)?;
 
-        self.cmdq
-            .send_rpc_command_no_wait(commands::rpc::SetSystemInfo::new(
-                pdev,
-                chipset,
-                ctx.vgpu.state(),
-            ))?;
-        self.cmdq
-            .send_rpc_command_no_wait(commands::rpc::SetRegistry::new(ctx.vgpu.state())?)?;
+        let generic_bootloader = hal.generic_bootloader(dev, chipset)?;
+
+        // GSP-RM reads the ucodes image through the image's page table only while it starts up, so
+        // the image is freed when the boot sequence returns.
+        let ucodes = UcodesImage::new(dev, chipset)?;
+        GspArgumentsPadded::set_bindata(&self.rmargs, &ucodes);
 
         // Perform the chipset-specific boot sequence, and retrieve the unload bundle.
         let unload_bundle = hal.boot(&self, &mut ctx, &gsp_fw)?.or_else(|| {
@@ -79,14 +91,25 @@ impl<'gsp> super::Gsp<'gsp> {
 
         dev_dbg!(pdev, "RISC-V active? {}\n", gsp_falcon.is_riscv_active(),);
 
-        hal.post_boot(&self, ctx, &gsp_fw)?;
-
-        // Wait until GSP is fully initialized.
-        commands::rpc::wait_gsp_init_done(&self.cmdq)?;
-
+        // GSP-RM answers GSP_INIT once it has finished starting, which includes the
+        // load-and-execute events that it raises along the way.
+        let libos_dma_address = self.libos.dma_address();
+        let bootloader_app_version = gsp_fw.bootloader.app_version;
         let static_info = self
             .cmdq
-            .send_rpc_command(commands::rpc::GetGspStaticInfo)?;
+            .send_gmc_command(GspInit::new(pdev, chipset, ctx.vgpu.state())?, |event| {
+                load_exec::handle_event(
+                    ctx,
+                    generic_bootloader.as_ref(),
+                    libos_dma_address,
+                    bootloader_app_version,
+                    event,
+                )
+            })?
+            .map_err(|status| {
+                dev_err!(dev, "GSP_INIT failed with status {:#x}\n", status);
+                EIO
+            })?;
 
         Ok(super::BootResult {
             unload_bundle: unload_guard.dismiss().1,
@@ -98,13 +121,24 @@ impl<'gsp> super::Gsp<'gsp> {
     fn shutdown_gsp(
         cmdq: &Cmdq<'_>,
         gsp_falcon: &Falcon<'_, Gsp>,
-        mode: commands::rpc::PowerStateLevel,
+        mode: PowerStateLevel,
     ) -> Result {
-        // Command to shut the GSP down.
-        cmdq.send_rpc_command(commands::rpc::UnloadingGuestDriver::new(mode))?;
+        // Command to shut the GSP down. GSP-RM does not answer it.
+        cmdq.send_gmc_command_no_wait(GspSuspend::new(mode))?;
 
-        // Wait until GSP signals it is suspended.
-        gsp_falcon.wait_for_processor_suspend()
+        // Wait until GSP signals it is suspended. GSP-RM posts messages while it suspends, and the
+        // GSP event interrupt is already freed, so this poll drains them.
+        read_poll_timeout(
+            || {
+                cmdq.drain()?;
+
+                Ok(gsp_falcon.is_processor_suspended())
+            },
+            |suspended| *suspended,
+            Delta::from_millis(10),
+            Delta::from_secs(5),
+        )
+        .map(|_| ())
     }
 
     /// Attempts to unload the GSP firmware.
@@ -118,12 +152,8 @@ impl<'gsp> super::Gsp<'gsp> {
         let dev = ctx.dev();
 
         // Shut down the GSP. Keep going even in case of error.
-        let mut res = Self::shutdown_gsp(
-            &self.cmdq,
-            ctx.gsp_falcon,
-            commands::rpc::PowerStateLevel::Level0,
-        )
-        .inspect_err(|e| dev_err!(dev, "GSP shutdown failed: {:?}\n", e));
+        let mut res = Self::shutdown_gsp(&self.cmdq, ctx.gsp_falcon, PowerStateLevel::Level0)
+            .inspect_err(|e| dev_err!(dev, "GSP shutdown failed: {:?}\n", e));
 
         // Run the unload bundle to reset the GSP so it can be booted again.
         if let Some(unload_bundle) = unload_bundle {

@@ -125,7 +125,6 @@ pub(super) fn core_resume(
 /// - `EINVAL` if the command ID of `event` is not that of a load-and-execute event.
 ///
 /// Errors from the handlers are propagated as-is.
-#[expect(dead_code)]
 pub(super) fn handle_event(
     ctx: &GspBootContext<'_, '_>,
     bootloader: Option<&GenericBootloader>,

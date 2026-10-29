@@ -24,7 +24,6 @@ mod load_exec;
 mod logbuffer;
 mod nvkv;
 mod regs;
-mod sequencer;
 
 use logbuffer::LogBuffers;
 pub(crate) use logbuffer::RetainedLogs;
@@ -132,8 +131,12 @@ impl<'gsp> Gsp<'gsp> {
             // kgspSetupLibosInitArgs_IMPL (creates pLibosInitArgs[] array)
             Ok(try_pin_init!(Self {
                 cmdq <- Cmdq::new(dev, bar),
-                rmargs: Coherent::init(dev, GFP_KERNEL, GspArgumentsPadded::new(&cmdq))?,
                 rm_state_monitor: Coherent::zeroed(dev, GFP_KERNEL)?,
+                rmargs: Coherent::init(
+                    dev,
+                    GFP_KERNEL,
+                    GspArgumentsPadded::new(&cmdq, rm_state_monitor),
+                )?,
                 libos: {
                     let mut libos = CoherentBox::zeroed_slice(
                         dev,
@@ -162,6 +165,6 @@ pub(crate) struct UnloadBundle<'a>(KBox<dyn hal::UnloadBundle + 'a>);
 pub(crate) struct BootResult<'a> {
     /// The unload bundle for [`Gsp::unload`], if one could be built.
     pub(crate) unload_bundle: Option<UnloadBundle<'a>>,
-    /// The static GPU configuration, as GSP-RM reported it at the end of boot.
+    /// The static GPU configuration, as decoded from the `GSP_INIT` reply.
     pub(crate) static_info: commands::GspStaticInfo,
 }
