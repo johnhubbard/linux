@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
+// The r570 firmware accepts no GMC command, so no caller sends one, and the module is built as
+// dead code.
+#[expect(dead_code)]
+pub(crate) mod gmc;
 pub(crate) mod rpc;
 
 use core::{
