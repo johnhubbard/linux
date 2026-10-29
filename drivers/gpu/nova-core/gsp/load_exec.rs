@@ -133,7 +133,6 @@ pub(super) fn resume_gsp_rm(
 ///   payload of `event` is shorter than the parameters of the handler.
 ///
 /// Errors from the handlers are propagated as-is.
-#[expect(dead_code)]
 pub(super) fn handle_event(
     ctx: &GspBootContext<'_, '_>,
     bootloader: Option<&GenericBootloader>,
