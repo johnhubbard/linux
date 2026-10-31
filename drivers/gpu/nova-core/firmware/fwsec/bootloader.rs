@@ -19,10 +19,8 @@ use crate::{
     falcon::{
         gsp::Gsp,
         Falcon,
-        FalconBromParams,
         FalconDmaLoadable,
-        FalconFbifTarget,
-        FalconFirmware, //
+        FalconFbifTarget, //
     },
     firmware::{
         fwsec::FwsecFirmware,
@@ -44,8 +42,6 @@ pub(crate) struct FwsecFirmwareWithBl<'a> {
     bootloader: GenericBootloader,
     /// Descriptor to be loaded into DMEM for the bootloader to read.
     dmem_desc: BootloaderDmemDescV2,
-    /// BROM parameters of the loaded firmware.
-    brom_params: FalconBromParams,
 }
 
 impl<'a> FwsecFirmwareWithBl<'a> {
@@ -109,7 +105,6 @@ impl<'a> FwsecFirmwareWithBl<'a> {
             _firmware_dma: firmware_dma,
             bootloader,
             dmem_desc,
-            brom_params: firmware.brom_params(),
         })
     }
 
@@ -124,13 +119,7 @@ impl<'a> FwsecFirmwareWithBl<'a> {
             .inspect_err(|e| dev_err!(dev, "Failed to reset GSP falcon: {:?}\n", e))?;
         let (mbox0, _) = self
             .bootloader
-            .run(
-                falcon,
-                &self.dmem_desc,
-                &self.brom_params,
-                FalconFbifTarget::CoherentSysmem,
-                0,
-            )
+            .run(falcon, &self.dmem_desc, FalconFbifTarget::CoherentSysmem, 0)
             .inspect_err(|e| dev_err!(dev, "Failed to run the FWSEC bootloader: {:?}\n", e))?;
         if mbox0 != 0 {
             dev_err!(dev, "FWSEC firmware returned error {}\n", mbox0);

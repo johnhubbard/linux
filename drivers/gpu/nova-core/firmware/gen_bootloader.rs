@@ -222,8 +222,7 @@ impl GenericBootloader {
     /// Loads this bootloader and `dmem_desc` into `falcon` by PIO, and runs the bootloader.
     ///
     /// The DMA context that `dmem_desc` names is programmed for physical addresses in `target`,
-    /// the falcon's BROM parameters are set from `brom_params`, and `mbox0` is written to
-    /// `MAILBOX0` before the falcon starts.
+    /// and `mbox0` is written to `MAILBOX0` before the falcon starts.
     ///
     /// Returns the `MAILBOX0` and `MAILBOX1` values once the falcon halts.
     ///
@@ -237,14 +236,12 @@ impl GenericBootloader {
         &self,
         falcon: &Falcon<'_, Gsp>,
         dmem_desc: &BootloaderDmemDescV2,
-        brom_params: &FalconBromParams,
         target: FalconFbifTarget,
         mbox0: u32,
     ) -> Result<(u32, u32)> {
         falcon.pio_load(&GenericBootloaderLoad {
             bootloader: self,
             dmem_desc,
-            brom_params,
         })?;
 
         falcon.pfalcon.update(
@@ -265,14 +262,18 @@ impl GenericBootloader {
 struct GenericBootloaderLoad<'a> {
     bootloader: &'a GenericBootloader,
     dmem_desc: &'a BootloaderDmemDescV2,
-    brom_params: &'a FalconBromParams,
 }
 
 impl FalconFirmware for GenericBootloaderLoad<'_> {
     type Target = Gsp;
 
     fn brom_params(&self) -> FalconBromParams {
-        self.brom_params.clone()
+        // The bootloader is unsigned, so it has no BROM parameters.
+        FalconBromParams {
+            pkc_data_offset: 0,
+            engine_id_mask: 0,
+            ucode_id: 0,
+        }
     }
 
     fn boot_addr(&self) -> u32 {
