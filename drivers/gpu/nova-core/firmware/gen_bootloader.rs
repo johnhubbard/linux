@@ -12,7 +12,6 @@ use kernel::{
         Alignable,
         Alignment, //
     },
-    sizes,
 };
 
 use crate::{
@@ -39,14 +38,19 @@ pub(crate) struct GenericBootloader {
 }
 
 impl GenericBootloader {
-    /// Loads the generic bootloader image for `chipset`.
+    /// Loads the generic bootloader image for `chipset`, placed in the last blocks of an IMEM of
+    /// `imem_size` bytes.
     ///
     /// # Errors
     ///
     /// - `EINVAL` if a required TLV field is absent.
-    /// - `EOVERFLOW` if the image is larger than 64 KiB.
+    /// - `EOVERFLOW` if the image does not fit in IMEM.
     /// - `ENOMEM` if the padded copy of the code cannot be allocated.
-    pub(crate) fn new(dev: &device::Device<device::Bound>, chipset: Chipset) -> Result<Self> {
+    pub(crate) fn new(
+        dev: &device::Device<device::Bound>,
+        chipset: Chipset,
+        imem_size: usize,
+    ) -> Result<Self> {
         let fw = request_tlv(dev, chipset, "gen_bootloader")?;
         let tlv = Tlv::new(fw.data())?;
         dev_dbg!(
@@ -70,11 +74,8 @@ impl GenericBootloader {
             ucode
         };
 
-        // The bootloader's code must be loaded in the area right below the first 64K of IMEM.
-        const BOOTLOADER_LOAD_CEILING: usize = sizes::SZ_64K;
-        let imem_dst_start = BOOTLOADER_LOAD_CEILING
-            .checked_sub(ucode.len())
-            .ok_or(EOVERFLOW)?;
+        // The top of IMEM, above the blocks that the bootloader loads the image into.
+        let imem_dst_start = imem_size.checked_sub(ucode.len()).ok_or(EOVERFLOW)?;
 
         let start_tag = u16::try_from(tlv.get_u32(b"STRT")?)?;
 
