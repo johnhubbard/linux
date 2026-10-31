@@ -12,12 +12,7 @@ use kernel::{
         Device, //
     },
     dma::Coherent,
-    io::{
-        register::Array,
-        Io, //
-    },
-    prelude::*,
-    transmute::AsBytes,
+    prelude::*, //
 };
 
 use crate::{
@@ -26,12 +21,8 @@ use crate::{
         Falcon,
         FalconBromParams,
         FalconDmaLoadable,
-        FalconFbifMemType,
         FalconFbifTarget,
-        FalconFirmware,
-        FalconPioDmemLoadTarget,
-        FalconPioImemLoadTarget,
-        FalconPioLoadable, //
+        FalconFirmware, //
     },
     firmware::{
         fwsec::FwsecFirmware,
@@ -42,7 +33,6 @@ use crate::{
     },
     gpu::Chipset,
     num::FromSafeCast, //
-    regs,
 };
 
 /// Wrapper for [`FwsecFirmware`] that includes the bootloader performing the actual load
@@ -132,59 +122,21 @@ impl<'a> FwsecFirmwareWithBl<'a> {
         falcon
             .reset()
             .inspect_err(|e| dev_err!(dev, "Failed to reset GSP falcon: {:?}\n", e))?;
-        falcon
-            .pio_load(self)
-            .inspect_err(|e| dev_err!(dev, "Failed to load FWSEC firmware: {:?}\n", e))?;
-
-        // Configure DMA index for the bootloader to fetch the FWSEC firmware from system memory.
-        falcon.pfalcon.update(
-            regs::NV_PFALCON_FBIF_TRANSCFG::try_at(usize::from_safe_cast(self.dmem_desc.ctx_dma()))
-                .ok_or(EINVAL)?,
-            |v| {
-                v.with_target(FalconFbifTarget::CoherentSysmem)
-                    .with_mem_type(FalconFbifMemType::Physical)
-            },
-        );
-
-        let (mbox0, _) = falcon
-            .boot(Some(0), None)
-            .inspect_err(|e| dev_err!(dev, "Failed to boot FWSEC firmware: {:?}\n", e))?;
+        let (mbox0, _) = self
+            .bootloader
+            .run(
+                falcon,
+                &self.dmem_desc,
+                &self.brom_params,
+                FalconFbifTarget::CoherentSysmem,
+                0,
+            )
+            .inspect_err(|e| dev_err!(dev, "Failed to run the FWSEC bootloader: {:?}\n", e))?;
         if mbox0 != 0 {
             dev_err!(dev, "FWSEC firmware returned error {}\n", mbox0);
             Err(EIO)
         } else {
             Ok(())
-        }
-    }
-}
-
-impl FalconFirmware for FwsecFirmwareWithBl<'_> {
-    type Target = Gsp;
-
-    fn brom_params(&self) -> FalconBromParams {
-        self.brom_params.clone()
-    }
-
-    fn boot_addr(&self) -> u32 {
-        // On V2 platforms, the boot address is extracted from the generic bootloader, because the
-        // gbl is what actually copies FWSEC into memory, so that is what needs to be booted.
-        self.bootloader.boot_addr()
-    }
-}
-
-impl FalconPioLoadable for FwsecFirmwareWithBl<'_> {
-    fn imem_sec_load_params(&self) -> Option<FalconPioImemLoadTarget<'_>> {
-        None
-    }
-
-    fn imem_ns_load_params(&self) -> Option<FalconPioImemLoadTarget<'_>> {
-        Some(self.bootloader.imem_load_params())
-    }
-
-    fn dmem_load_params(&self) -> FalconPioDmemLoadTarget<'_> {
-        FalconPioDmemLoadTarget {
-            data: self.dmem_desc.as_bytes(),
-            dst_start: 0,
         }
     }
 }

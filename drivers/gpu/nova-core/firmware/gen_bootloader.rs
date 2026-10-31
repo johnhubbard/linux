@@ -7,6 +7,10 @@
 
 use kernel::{
     device,
+    io::{
+        register::Array,
+        Io, //
+    },
     prelude::*,
     ptr::{
         Alignable,
@@ -18,8 +22,16 @@ use kernel::{
 use crate::{
     falcon::{
         self,
+        gsp::Gsp,
+        Falcon,
+        FalconBromParams,
         FalconDmaLoadTarget,
-        FalconPioImemLoadTarget, //
+        FalconFbifMemType,
+        FalconFbifTarget,
+        FalconFirmware,
+        FalconPioDmemLoadTarget,
+        FalconPioImemLoadTarget,
+        FalconPioLoadable, //
     },
     firmware::tlv::{
         request_tlv, //
@@ -27,6 +39,7 @@ use crate::{
     },
     gpu::Chipset,
     num::FromSafeCast, //
+    regs,
 };
 
 /// Structure used by the boot-loader to load the rest of the code.
@@ -192,17 +205,94 @@ impl GenericBootloader {
     }
 
     /// Returns the start address of the bootloader.
-    pub(crate) fn boot_addr(&self) -> u32 {
+    fn boot_addr(&self) -> u32 {
         u32::from(self.start_tag) << 8
     }
 
     /// Returns the PIO parameters that place this bootloader in non-secure IMEM.
-    pub(crate) fn imem_load_params(&self) -> FalconPioImemLoadTarget<'_> {
+    fn imem_load_params(&self) -> FalconPioImemLoadTarget<'_> {
         FalconPioImemLoadTarget {
             data: self.ucode.as_ref(),
             dst_start: self.imem_dst_start,
             secure: false,
             start_tag: self.start_tag,
+        }
+    }
+
+    /// Loads this bootloader and `dmem_desc` into `falcon` by PIO, and runs the bootloader.
+    ///
+    /// The DMA context that `dmem_desc` names is programmed for physical addresses in `target`,
+    /// the falcon's BROM parameters are set from `brom_params`, and `mbox0` is written to
+    /// `MAILBOX0` before the falcon starts.
+    ///
+    /// Returns the `MAILBOX0` and `MAILBOX1` values once the falcon halts.
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` if the DMA context that `dmem_desc` names is not a `TRANSCFG` slot of the
+    ///   falcon.
+    ///
+    /// Errors from the PIO load and from [`Falcon::boot`] are propagated as-is.
+    pub(crate) fn run(
+        &self,
+        falcon: &Falcon<'_, Gsp>,
+        dmem_desc: &BootloaderDmemDescV2,
+        brom_params: &FalconBromParams,
+        target: FalconFbifTarget,
+        mbox0: u32,
+    ) -> Result<(u32, u32)> {
+        falcon.pio_load(&GenericBootloaderLoad {
+            bootloader: self,
+            dmem_desc,
+            brom_params,
+        })?;
+
+        falcon.pfalcon.update(
+            regs::NV_PFALCON_FBIF_TRANSCFG::try_at(usize::from_safe_cast(dmem_desc.ctx_dma()))
+                .ok_or(EINVAL)?,
+            |v| {
+                v.with_target(target)
+                    .with_mem_type(FalconFbifMemType::Physical)
+            },
+        );
+
+        falcon.boot(Some(mbox0), None)
+    }
+}
+
+/// The bootloader paired with a descriptor, as the firmware that [`Falcon::pio_load`] loads: the
+/// bootloader into non-secure IMEM, and the descriptor into DMEM at offset 0.
+struct GenericBootloaderLoad<'a> {
+    bootloader: &'a GenericBootloader,
+    dmem_desc: &'a BootloaderDmemDescV2,
+    brom_params: &'a FalconBromParams,
+}
+
+impl FalconFirmware for GenericBootloaderLoad<'_> {
+    type Target = Gsp;
+
+    fn brom_params(&self) -> FalconBromParams {
+        self.brom_params.clone()
+    }
+
+    fn boot_addr(&self) -> u32 {
+        self.bootloader.boot_addr()
+    }
+}
+
+impl FalconPioLoadable for GenericBootloaderLoad<'_> {
+    fn imem_sec_load_params(&self) -> Option<FalconPioImemLoadTarget<'_>> {
+        None
+    }
+
+    fn imem_ns_load_params(&self) -> Option<FalconPioImemLoadTarget<'_>> {
+        Some(self.bootloader.imem_load_params())
+    }
+
+    fn dmem_load_params(&self) -> FalconPioDmemLoadTarget<'_> {
+        FalconPioDmemLoadTarget {
+            data: self.dmem_desc.as_bytes(),
+            dst_start: 0,
         }
     }
 }
