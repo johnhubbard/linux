@@ -63,8 +63,6 @@ impl DebugfsData {
     fn new() -> impl PinInit<Self> {
         let root = debugfs::Dir::new(c"nova-core");
 
-        // Deciding here, rather than when the first GPU goes away, keeps the teardown path of a
-        // device from having to create anything.
         let mut retained_logs = gsp::RetainedLogs::new();
         if module_parameters::gsp_keep_logs.value() {
             retained_logs.enable(&root);

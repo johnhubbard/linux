@@ -327,12 +327,17 @@ impl<'a> LogBuffers<'a> {
     }
 
     /// Creates an initializer exposing these buffers under a directory named after their device.
+    ///
+    /// Removes the copy that an earlier binding of the device left behind, if there is one,
+    /// because that copy holds the name of the directory.
     pub(super) fn scope(self) -> impl PinInit<debugfs::Scope<Self>, Infallible> + 'a {
         let dev = self.dev;
+        let data = crate::debugfs_data(dev);
 
-        let log_parent: &debugfs::Dir = crate::debugfs_data(dev).root();
+        data.retained_logs().lock().remove(dev.name());
 
-        log_parent.scope(self, dev.name(), |logs, dir| logs.register_debugfs(dir))
+        data.root()
+            .scope(self, dev.name(), |logs, dir| logs.register_debugfs(dir))
     }
 
     /// Preserves whatever the GSP logged, so it can still be read once the GPU is gone.
@@ -363,27 +368,16 @@ impl<'a> LogBuffers<'a> {
             logrmon: self.logrmon.snapshot()?,
         };
 
-        // Nothing was ever logged, so there is nothing to keep. A copy from an earlier run of
-        // this device is deliberately left alone: logs from a run that failed are worth more
-        // than the silence of one that did not. A run that did log something does replace it,
-        // even where what it replaces came from a run that failed: nothing here can tell the two
-        // apart, and keeping the older copy would mean never seeing anything newer.
+        // Nothing was ever logged, so there is nothing to keep.
         if logs.is_empty() {
             return Ok(());
         }
 
-        // Make every allocation of our own that can fail before the previous copy of this device
-        // is dropped, so that none of them failing can leave it with no logs at all.
         let scope = KBox::<debugfs::Scope<RetainedLogBuffers>>::new_uninit(GFP_KERNEL)?;
 
         let mut retained = data.retained_logs().lock();
 
         retained.gpus.reserve(1, GFP_KERNEL)?;
-
-        // An earlier run of the same device may have left a copy behind, and its directory
-        // carries the name about to be used again, so it has to go first. Nothing below can
-        // fail, so the replacement is guaranteed to take its place.
-        retained.gpus.retain(|gpu| *gpu.name != *logs.name);
 
         let scope = scope.write_pin_init(dir.scope(logs, self.dev.name(), |logs, dir| {
             logs.register_debugfs(dir)
@@ -459,14 +453,15 @@ impl RetainedLogBuffers {
 
 /// Log buffers of GPUs that are gone, and the debugfs entries exposing them.
 ///
-/// The copies live under a `retained` directory of their own instead of next to the entries of
-/// the GPUs that are actually bound, so that a device coming back does not find its name taken.
+/// A copy takes the name of the directory that the live buffers of its GPU had, and is removed
+/// when that GPU is bound again.
 pub(crate) struct RetainedLogs {
     /// One entry per GPU.
     ///
     /// Declared before `dir`, as the copies live below it.
     gpus: KVec<Pin<KBox<debugfs::Scope<RetainedLogBuffers>>>>,
-    /// Parent directory of all copies. `None` unless retaining was asked for.
+    /// Parent directory of all copies, the root directory of the driver. `None` unless retaining
+    /// was asked for.
     dir: Option<debugfs::Dir>,
 }
 
@@ -479,7 +474,7 @@ impl RetainedLogs {
         }
     }
 
-    /// Creates the directory the copies will live in, enabling retaining.
+    /// Enables retaining, with the copies created in `parent`.
     ///
     /// Does nothing without `CONFIG_DEBUG_FS`, where a [`debugfs::Dir`] is a zero-sized type and
     /// the copies could never be read back.
@@ -488,6 +483,11 @@ impl RetainedLogs {
             return;
         }
 
-        self.dir = Some(parent.subdir(c"retained"));
+        self.dir = Some(parent.clone());
+    }
+
+    /// Removes the copy of the log buffers of the GPU named `name`, if there is one.
+    fn remove(&mut self, name: &CStr) {
+        self.gpus.retain(|gpu| *gpu.name != *name);
     }
 }
