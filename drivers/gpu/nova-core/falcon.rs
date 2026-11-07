@@ -171,6 +171,18 @@ bounded_enum! {
     }
 }
 
+bounded_enum! {
+    /// MMU engine ID under which the falcon's FBIF issues a DMA transfer. A kernel driver should
+    /// select `Bar2Fn0`. (Only GPU firmware selects `Own`.)
+    #[derive(Debug, Copy, Clone)]
+    pub(crate) enum FalconFbifEngineIdFlag with From<Bounded<u32, 1>> {
+        /// The engine ID of PCI function 0's BAR2.
+        Bar2Fn0 = 0,
+        /// The falcon's own engine ID.
+        Own = 1,
+    }
+}
+
 const PFALCON_REGION_SIZE: usize = SZ_4K;
 const PFALCON2_REGION_SIZE: usize = SZ_4K;
 

@@ -18,6 +18,7 @@ use crate::{
         DmaTrfCmdSize,
         FalconCoreRev,
         FalconCoreRevSubversion,
+        FalconFbifEngineIdFlag,
         FalconFbifMemType,
         FalconFbifTarget,
         FalconMem,
@@ -290,7 +291,12 @@ register! {
         0:0     trigger => bool;
     }
 
+    /// One of the eight Framebuffer Interface (FBIF) apertures. An aperture selects which memory a
+    /// DMA transfer through it reaches, VRAM or system memory, whether the address is physical or
+    /// virtual, and the MMU engine ID under which the FBIF issues the transfer. The `ctxdma`
+    /// field of [`NV_PFALCON_FALCON_DMATRFCMD`] selects a transfer's aperture by index.
     pub(crate) NV_PFALCON_FBIF_TRANSCFG(u32)[8] @ 0x00000600 {
+        16:16   engine_id_flag => FalconFbifEngineIdFlag;
         2:2     mem_type => FalconFbifMemType;
         1:0     target ?=> FalconFbifTarget;
     }
