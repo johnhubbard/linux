@@ -17,6 +17,7 @@ use kernel::{
 use crate::{
     falcon::{
         gsp::Gsp,
+        sec2::Sec2,
         Falcon,
         FalconBromParams,
         FalconDmaLoadTarget,
@@ -38,10 +39,16 @@ use crate::{
 /// DMEM virtual address value that means "no virtual address assigned".
 const FLCN_DMEM_VA_INVALID: u32 = 0xffff_ffff;
 
-/// The GSP falcon and device that the load-and-execute event handlers share.
+/// The falcons, device and boot parameters that the load-and-execute event handlers and the
+/// core resume share.
 struct LoadExecContext<'a, 'gpu> {
     gsp_falcon: &'a Falcon<'gpu, Gsp>,
+    sec2_falcon: &'a Falcon<'gpu, Sec2>,
     dev: &'a device::Device,
+    /// GSP bootloader application version.
+    bootloader_app_version: u32,
+    /// DMA address of the LibOS init arguments.
+    libos_dma_address: u64,
 }
 
 #[expect(dead_code)]
@@ -67,6 +74,58 @@ impl LoadExecContext<'_, '_> {
 
         self.gsp_falcon.reset()?;
         self.gsp_falcon.dma_reset();
+
+        Ok(())
+    }
+
+    /// Runs the core resume, in which SEC2 restarts GSP-RM after a load-and-execute binary has
+    /// halted on the GSP falcon.
+    ///
+    /// # Errors
+    ///
+    /// - `EIO` if SEC2 reports a failure, or if the GSP is not running RISC-V afterwards.
+    /// - `ETIMEDOUT` if SEC2 does not complete the reload within two seconds.
+    ///
+    /// Errors from the GSP reset and the SEC2 start are propagated as-is.
+    fn core_resume(&self) -> Result {
+        let gsp_falcon = self.gsp_falcon;
+        let sec2_falcon = self.sec2_falcon;
+
+        gsp_falcon.reset()?;
+
+        gsp_falcon.write_mailboxes(
+            Some(self.libos_dma_address as u32),
+            Some((self.libos_dma_address >> 32) as u32),
+        );
+
+        sec2_falcon.start()?;
+
+        gsp_falcon
+            .check_reload_completed(Delta::from_secs(2))
+            .inspect_err(|_| {
+                dev_err!(
+                    self.dev,
+                    "Timeout waiting for SEC2 to resume GSP-RM (SEC2 mbox0={:#x})\n",
+                    sec2_falcon.read_mailbox0()
+                );
+            })?;
+
+        let sec2_mbox0 = sec2_falcon.read_mailbox0();
+        if sec2_mbox0 != 0 {
+            dev_err!(
+                self.dev,
+                "SEC2 reported error during core resume: {:#x}\n",
+                sec2_mbox0
+            );
+            return Err(EIO);
+        }
+
+        gsp_falcon.write_os_version(self.bootloader_app_version);
+
+        if !gsp_falcon.is_riscv_active() {
+            dev_err!(self.dev, "GSP RISC-V not active after core resume\n");
+            return Err(EIO);
+        }
 
         Ok(())
     }
