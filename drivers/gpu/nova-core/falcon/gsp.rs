@@ -62,7 +62,6 @@ impl<'a> Falcon<'a, Gsp> {
     /// # Errors
     ///
     /// - `ETIMEDOUT` if the core has not suspended within two seconds.
-    #[expect(dead_code)]
     pub(crate) fn wait_for_processor_suspend(&self) -> Result {
         read_poll_timeout(
             || Ok(self.is_processor_suspended()),

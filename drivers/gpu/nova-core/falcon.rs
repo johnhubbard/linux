@@ -41,6 +41,10 @@ pub(crate) mod sec2;
 /// Alignment (in bytes) of falcon memory blocks.
 pub(crate) const MEM_BLOCK_ALIGNMENT: usize = 256;
 
+/// `MAILBOX0` value that means "the falcon binary has not started". A binary that runs replaces
+/// it with its own status.
+pub(crate) const FLCN_ERR_BINARY_NOT_STARTED: u32 = 0xfe;
+
 bounded_enum! {
     /// Revision number of a falcon core, used in the [`crate::regs::NV_PFALCON_FALCON_HWCFG1`]
     /// register.
@@ -142,7 +146,6 @@ pub(crate) enum FalconDmaSource<'a> {
     /// A DMA object in system memory.
     Sysmem(&'a Coherent<'a, [u8]>),
     /// GPU framebuffer memory at physical address `base`.
-    #[expect(dead_code)]
     Framebuffer { base: u64 },
 }
 
@@ -543,7 +546,6 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
     /// # Errors
     ///
     /// Errors from `load` are propagated as-is.
-    #[expect(dead_code)]
     pub(crate) fn with_fbif_aperture<R>(
         &self,
         aperture: Bounded<u32, 3>,
@@ -568,7 +570,7 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
     ///
     /// The transfer goes through the FBIF aperture `aperture`, which the caller programs for the
     /// location of `src` beforehand.
-    fn dma_wr(
+    pub(crate) fn dma_wr(
         &self,
         src: FalconDmaSource<'_>,
         aperture: Bounded<u32, 3>,
@@ -723,8 +725,13 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
         Ok(())
     }
 
+    /// Programs the BROM registers with `params`.
+    pub(crate) fn program_brom(&self, params: &FalconBromParams) {
+        self.hal.program_brom(self, params);
+    }
+
     /// Writes `boot_addr`, the address at which the falcon core starts, to the `BOOTVEC` register.
-    fn write_bootvec(&self, boot_addr: u32) {
+    pub(crate) fn write_bootvec(&self, boot_addr: u32) {
         self.pfalcon
             .write_reg(regs::NV_PFALCON_FALCON_BOOTVEC::zeroed().with_value(boot_addr));
     }
