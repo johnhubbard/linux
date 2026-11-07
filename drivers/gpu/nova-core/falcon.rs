@@ -18,6 +18,7 @@ use kernel::{
         Io,
         Mmio, //
     },
+    num::Bounded,
     prelude::*,
     sizes::SZ_4K,
     time::Delta,
@@ -533,9 +534,13 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
 
     /// Perform a DMA write according to `load_offsets` from `src` into the falcon's
     /// `target_mem`.
+    ///
+    /// The transfer goes through the FBIF aperture `aperture`, which the caller programs for the
+    /// location of `src` beforehand.
     fn dma_wr(
         &self,
         src: FalconDmaSource<'_>,
+        aperture: Bounded<u32, 3>,
         target_mem: FalconMem,
         load_offsets: FalconDmaLoadTarget,
     ) -> Result {
@@ -603,6 +608,7 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
         );
 
         let cmd = regs::NV_PFALCON_FALCON_DMATRFCMD::zeroed()
+            .with_ctxdma(aperture)
             .with_size(DmaTrfCmdSize::Size256B)
             .with_falcon_mem(target_mem)
             .with_set_dmtag(tag_dmem);
@@ -662,13 +668,18 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
                     .with_mem_type(FalconFbifMemType::Physical)
             });
 
+        // Both transfers go through aperture 0, which is programmed above.
+        const APERTURE: Bounded<u32, 3> = Bounded::<u32, 3>::new::<0>();
+
         self.dma_wr(
             FalconDmaSource::Sysmem(&dma_obj),
+            APERTURE,
             FalconMem::ImemSecure,
             fw.imem_sec_load_params(),
         )?;
         self.dma_wr(
             FalconDmaSource::Sysmem(&dma_obj),
+            APERTURE,
             FalconMem::Dmem { tag: false },
             fw.dmem_load_params(),
         )?;
