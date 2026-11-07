@@ -526,8 +526,7 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
 
         self.hal.program_brom(self, &fw.brom_params());
 
-        self.pfalcon
-            .write_reg(regs::NV_PFALCON_FALCON_BOOTVEC::zeroed().with_value(fw.boot_addr()));
+        self.write_bootvec(fw.boot_addr());
 
         Ok(())
     }
@@ -719,10 +718,15 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
         self.hal.program_brom(self, &fw.brom_params());
 
         // Set `BootVec` to start of non-secure code.
-        self.pfalcon
-            .write_reg(regs::NV_PFALCON_FALCON_BOOTVEC::zeroed().with_value(fw.boot_addr()));
+        self.write_bootvec(fw.boot_addr());
 
         Ok(())
+    }
+
+    /// Writes `boot_addr`, the address at which the falcon core starts, to the `BOOTVEC` register.
+    fn write_bootvec(&self, boot_addr: u32) {
+        self.pfalcon
+            .write_reg(regs::NV_PFALCON_FALCON_BOOTVEC::zeroed().with_value(boot_addr));
     }
 
     /// Wait until the falcon CPU is halted.
