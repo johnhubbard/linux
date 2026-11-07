@@ -532,6 +532,38 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
         Ok(())
     }
 
+    /// Programs the FBIF aperture `aperture` with the value that `configure` returns, runs `load`,
+    /// and restores the aperture once `load` has returned `Ok`.
+    ///
+    /// An aperture is one of the [`crate::regs::NV_PFALCON_FBIF_TRANSCFG`] registers, and it
+    /// selects which memory a DMA transfer through it reaches.
+    ///
+    /// The aperture keeps the programmed value if `load` fails, since a falcon that `load` started
+    /// and that has not halted may still be reading through the aperture.
+    ///
+    /// # Errors
+    ///
+    /// Errors from `load` are propagated as-is.
+    #[expect(dead_code)]
+    pub(crate) fn with_fbif_aperture<R>(
+        &self,
+        aperture: Bounded<u32, 3>,
+        configure: impl FnOnce(regs::NV_PFALCON_FBIF_TRANSCFG) -> regs::NV_PFALCON_FBIF_TRANSCFG,
+        load: impl FnOnce() -> Result<R>,
+    ) -> Result<R> {
+        // `RegisterArrayLoc` is not `Copy`, so each register access must build its own location.
+        let transcfg = || regs::NV_PFALCON_FBIF_TRANSCFG::at(usize::from(aperture));
+
+        let transcfg_to_restore = self.pfalcon.read(transcfg());
+        self.pfalcon.update(transcfg(), configure);
+
+        let result = load()?;
+
+        self.pfalcon.update(transcfg(), |_| transcfg_to_restore);
+
+        Ok(result)
+    }
+
     /// Perform a DMA write according to `load_offsets` from `src` into the falcon's
     /// `target_mem`.
     ///
