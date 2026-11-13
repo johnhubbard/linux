@@ -54,6 +54,21 @@ impl<'a> Falcon<'a, Gsp> {
             .processor_suspended()
     }
 
+    /// Waits until GSP-RM has suspended the RISC-V core.
+    ///
+    /// # Errors
+    ///
+    /// - `ETIMEDOUT` if the core has not suspended within five seconds.
+    pub(crate) fn wait_for_processor_suspend(&self) -> Result {
+        read_poll_timeout(
+            || Ok(self.is_processor_suspended()),
+            |suspended| *suspended,
+            Delta::from_millis(10),
+            Delta::from_secs(5),
+        )
+        .map(|_| ())
+    }
+
     /// Clears the SWGEN0 latch in the GSP falcon.
     ///
     /// While the latch is set, no later message signals the tree, so a caller that consumed a
