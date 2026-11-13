@@ -97,13 +97,7 @@ impl<'gsp> super::Gsp<'gsp> {
         cmdq.send_rpc_command(commands::rpc::UnloadingGuestDriver::new(mode))?;
 
         // Wait until GSP signals it is suspended.
-        read_poll_timeout(
-            || Ok(gsp_falcon.is_processor_suspended()),
-            |suspended| *suspended,
-            Delta::from_millis(10),
-            Delta::from_secs(5),
-        )
-        .map(|_| ())
+        gsp_falcon.wait_for_processor_suspend()
     }
 
     /// Attempts to unload the GSP firmware.
