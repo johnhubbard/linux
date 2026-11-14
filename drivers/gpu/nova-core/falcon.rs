@@ -515,10 +515,7 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
         }
         self.pio_wr_dmem_slice(fw.dmem_load_params())?;
 
-        self.hal.program_brom(self, &fw.brom_params());
-
-        self.pfalcon
-            .write_reg(regs::NV_PFALCON_FALCON_BOOTVEC::zeroed().with_value(fw.boot_addr()));
+        self.program_brom_and_bootvec(&fw.brom_params(), fw.boot_addr());
 
         Ok(())
     }
@@ -676,13 +673,17 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
             fw.dmem_load_params(),
         )?;
 
-        self.hal.program_brom(self, &fw.brom_params());
-
-        // Set `BootVec` to start of non-secure code.
-        self.pfalcon
-            .write_reg(regs::NV_PFALCON_FALCON_BOOTVEC::zeroed().with_value(fw.boot_addr()));
+        self.program_brom_and_bootvec(&fw.brom_params(), fw.boot_addr());
 
         Ok(())
+    }
+
+    /// Programs the BROM registers with `brom_params` and the `BOOTVEC` register with `boot_addr`.
+    fn program_brom_and_bootvec(&self, brom_params: &FalconBromParams, boot_addr: u32) {
+        self.hal.program_brom(self, brom_params);
+
+        self.pfalcon
+            .write_reg(regs::NV_PFALCON_FALCON_BOOTVEC::zeroed().with_value(boot_addr));
     }
 
     /// Wait until the falcon CPU is halted.
