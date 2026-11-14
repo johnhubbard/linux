@@ -2535,8 +2535,10 @@ static int filemap_read_folio(struct file *file, filler_t filler,
 
 static bool filemap_range_uptodate(struct address_space *mapping,
 		loff_t pos, size_t count, struct folio *folio,
-		bool need_uptodate)
+		bool need_uptodate, bool can_read)
 {
+	loff_t isize;
+
 	if (folio_test_uptodate(folio))
 		return true;
 	/* pipes can't handle partially uptodate pages */
@@ -2557,6 +2559,18 @@ static bool filemap_range_uptodate(struct address_space *mapping,
 	if (pos == 0 && count >= folio_size(folio))
 		return false;
 
+	/*
+	 * If only blocks beyond i_size are not uptodate, have a caller that can
+	 * read the folio bring it uptodate, so that later reads do not have to
+	 * take the lock.
+	 */
+	isize = i_size_read(mapping->host);
+	if (can_read && isize > folio_pos(folio) &&
+	    isize < folio_next_pos(folio) &&
+	    mapping->a_ops->is_partially_uptodate(folio, 0,
+						  isize - folio_pos(folio)))
+		return false;
+
 	return mapping->a_ops->is_partially_uptodate(folio, pos, count);
 }
 
@@ -2564,6 +2578,8 @@ static int filemap_update_page(struct kiocb *iocb,
 		struct address_space *mapping, size_t count,
 		struct folio *folio, bool need_uptodate)
 {
+	bool can_read = !(iocb->ki_flags &
+			  (IOCB_NOIO | IOCB_NOWAIT | IOCB_WAITQ));
 	int error;
 
 	if (iocb->ki_flags & IOCB_NOWAIT) {
@@ -2597,11 +2613,11 @@ static int filemap_update_page(struct kiocb *iocb,
 
 	error = 0;
 	if (filemap_range_uptodate(mapping, iocb->ki_pos, count, folio,
-				   need_uptodate))
+				   need_uptodate, can_read))
 		goto unlock;
 
 	error = -EAGAIN;
-	if (iocb->ki_flags & (IOCB_NOIO | IOCB_NOWAIT | IOCB_WAITQ))
+	if (!can_read)
 		goto unlock;
 
 	error = filemap_read_folio(iocb->ki_filp, mapping->a_ops->read_folio,
