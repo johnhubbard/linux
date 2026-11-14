@@ -44,6 +44,10 @@ pub(crate) mod sec2;
 /// Alignment (in bytes) of falcon memory blocks.
 pub(crate) const MEM_BLOCK_ALIGNMENT: usize = 256;
 
+/// `MAILBOX0` value that means that a falcon binary has not started. A binary that reports its
+/// status through `MAILBOX0` replaces it.
+pub(crate) const FLCN_ERR_BINARY_NOT_STARTED: u32 = 0xfe;
+
 bounded_enum! {
     /// Revision number of a falcon core, used in the [`crate::regs::NV_PFALCON_FALCON_HWCFG1`]
     /// register.
@@ -145,7 +149,6 @@ pub(crate) enum FalconDmaSource<'a> {
     /// A DMA object in system memory.
     Sysmem(&'a Coherent<'a, [u8]>),
     /// GPU framebuffer memory at physical address `base`.
-    #[expect(dead_code)]
     Framebuffer { base: u64 },
 }
 
@@ -563,7 +566,7 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
     }
 
     /// Perform a DMA write according to `load_offsets` from `src` into the falcon's `target_mem`.
-    fn dma_wr(
+    pub(crate) fn dma_wr(
         &self,
         src: FalconDmaSource<'_>,
         target_mem: FalconMem,
@@ -699,7 +702,7 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
     }
 
     /// Programs the BROM registers with `brom_params` and the `BOOTVEC` register with `boot_addr`.
-    fn program_brom_and_bootvec(&self, brom_params: &FalconBromParams, boot_addr: u32) {
+    pub(crate) fn program_brom_and_bootvec(&self, brom_params: &FalconBromParams, boot_addr: u32) {
         self.hal.program_brom(self, brom_params);
 
         self.pfalcon
