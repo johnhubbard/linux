@@ -145,7 +145,6 @@ pub(crate) enum FalconDmaSource<'a> {
     /// A DMA object in system memory.
     Sysmem(&'a Coherent<'a, [u8]>),
     /// GPU framebuffer memory at physical address `base`.
-    #[expect(dead_code)]
     Framebuffer { base: u64 },
 }
 
@@ -563,7 +562,7 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
     }
 
     /// Perform a DMA write according to `load_offsets` from `src` into the falcon's `target_mem`.
-    fn dma_wr(
+    pub(crate) fn dma_wr(
         &self,
         src: FalconDmaSource<'_>,
         target_mem: FalconMem,
@@ -699,7 +698,7 @@ impl<'a, E: FalconEngine + 'static> Falcon<'a, E> {
     }
 
     /// Programs the BROM registers with `brom_params` and the `BOOTVEC` register with `boot_addr`.
-    fn program_brom_and_bootvec(&self, brom_params: &FalconBromParams, boot_addr: u32) {
+    pub(crate) fn program_brom_and_bootvec(&self, brom_params: &FalconBromParams, boot_addr: u32) {
         self.hal.program_brom(self, brom_params);
 
         self.pfalcon
