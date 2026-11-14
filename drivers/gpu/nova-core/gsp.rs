@@ -20,6 +20,7 @@ use kernel::{
 pub(crate) mod cmdq;
 pub(crate) mod commands;
 mod fw;
+mod load_exec;
 mod logbuffer;
 mod nvkv;
 mod regs;
