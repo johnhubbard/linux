@@ -32,6 +32,7 @@ use crate::{
             Cmdq, //
         },
         fw,
+        load_exec,
         GspBootContext,
         LibosMemoryRegionInitArgument, //
     },
@@ -213,11 +214,7 @@ impl GspSeqCmd {
             GspSeqCmd::RegPoll(cmd) => cmd.run(seq),
             GspSeqCmd::DelayUs(cmd) => cmd.run(seq),
             GspSeqCmd::RegStore(cmd) => cmd.run(seq),
-            GspSeqCmd::CoreReset => {
-                seq.gsp_falcon.reset()?;
-                seq.gsp_falcon.dma_reset();
-                Ok(())
-            }
+            GspSeqCmd::CoreReset => load_exec::core_reset(seq.gsp_falcon),
             GspSeqCmd::CoreStart => {
                 seq.gsp_falcon.start()?;
                 Ok(())
@@ -230,40 +227,13 @@ impl GspSeqCmd {
                 // At this point, 'SEC2-RTOS' has been loaded into SEC2 by the sequencer
                 // but neither SEC2-RTOS nor GSP-RM is running yet. This part of the
                 // sequencer will start both.
-
-                // Reset the GSP to prepare it for resuming.
-                seq.gsp_falcon.reset()?;
-
-                let libos_dma_address = seq.libos.dma_address();
-
-                // Write the libOS DMA address to GSP mailboxes.
-                seq.gsp_falcon.write_mailboxes(
-                    Some(libos_dma_address as u32),
-                    Some((libos_dma_address >> 32) as u32),
-                );
-
-                // Start the SEC2 falcon which will trigger GSP-RM to resume on the GSP.
-                seq.sec2_falcon.start()?;
-
-                // Poll until GSP-RM reload/resume has completed (up to 2 seconds).
-                seq.gsp_falcon.check_reload_completed(Delta::from_secs(2))?;
-
-                // Verify SEC2 completed successfully by checking its mailbox for errors.
-                let mbox0 = seq.sec2_falcon.read_mailbox0();
-                if mbox0 != 0 {
-                    dev_err!(seq.dev, "Sequencer: sec2 errors: {:?}\n", mbox0);
-                    return Err(EIO);
-                }
-
-                // Configure GSP with the bootloader version.
-                seq.gsp_falcon.write_os_version(seq.bootloader_app_version);
-
-                // Verify the GSP's RISC-V core is active indicating successful GSP boot.
-                if !seq.gsp_falcon.is_riscv_active() {
-                    dev_err!(seq.dev, "Sequencer: RISC-V core is not active\n");
-                    return Err(EIO);
-                }
-                Ok(())
+                load_exec::core_resume(
+                    seq.dev,
+                    seq.gsp_falcon,
+                    seq.sec2_falcon,
+                    seq.libos.dma_address(),
+                    seq.bootloader_app_version,
+                )
             }
         }
     }

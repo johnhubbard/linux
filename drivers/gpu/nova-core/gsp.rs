@@ -24,6 +24,7 @@ use kernel::{
 pub(crate) mod cmdq;
 pub(crate) mod commands;
 mod fw;
+mod load_exec;
 mod nvkv;
 mod regs;
 mod sequencer;
