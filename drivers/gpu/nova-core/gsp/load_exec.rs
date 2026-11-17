@@ -38,7 +38,11 @@ use crate::{
         GenericBootloader, //
     },
     gsp::{
-        cmdq::gmc::MessageFromGsp,
+        cmdq::gmc::{
+            GmcMessage,
+            MessageFromGsp, //
+        },
+        fw::GmcCommandId,
         GspBootContext, //
     },
     sbuffer::SBufferIter, //
@@ -116,6 +120,62 @@ pub(super) fn resume_gsp_rm(
     Ok(())
 }
 
+/// Runs the handler of the load-and-execute event `event`.
+///
+/// The command ID of `event` selects the handler, and the payload of `event` holds the parameters
+/// of that handler. `bootloader` is the generic falcon bootloader, which the handler of a
+/// `GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER` event requires. Each handler ends in [`resume_gsp_rm`],
+/// which receives `libos_dma_address` and `bootloader_app_version`.
+///
+/// # Errors
+///
+/// - `EINVAL` if the command ID of `event` is not that of a load-and-execute event, or if the
+///   payload of `event` is shorter than the parameters of the handler.
+///
+/// Errors from the handlers are propagated as-is.
+#[expect(dead_code)]
+pub(super) fn handle_event(
+    ctx: &GspBootContext<'_, '_>,
+    bootloader: Option<&GenericBootloader>,
+    libos_dma_address: DmaAddress,
+    bootloader_app_version: u32,
+    event: &GmcMessage<'_>,
+) -> Result {
+    let dev = ctx.dev();
+    let command = event.header().command();
+    let (slice_1, slice_2) = event.payload();
+    let mut payload = SBufferIter::new_reader([slice_1, slice_2]);
+
+    let (id, result) = match command.id() {
+        Ok(id @ GmcCommandId::ExecGenericBootloader) => (
+            id,
+            GenericBootloaderParams::read(&mut payload).and_then(|params| {
+                handle_generic_bootloader(
+                    ctx,
+                    bootloader,
+                    libos_dma_address,
+                    bootloader_app_version,
+                    &params,
+                )
+            }),
+        ),
+        Ok(id @ GmcCommandId::ExecHsBinary) => (
+            id,
+            HsBinaryParams::read(&mut payload).and_then(|params| {
+                handle_hs_binary(ctx, libos_dma_address, bootloader_app_version, &params)
+            }),
+        ),
+        _ => {
+            dev_err!(dev, "Not a load-and-execute event: {:?}\n", command);
+            return Err(EINVAL);
+        }
+    };
+
+    result.inspect_err(|e| {
+        dev_err!(dev, "Load-and-execute event {:?} failed: {:?}\n", id, e);
+    })
+}
+
 /// Waits until GSP-RM has suspended the RISC-V core, and then resets the GSP falcon.
 fn reset_gsp_falcon_after_suspend(dev: &device::Device, gsp_falcon: &Falcon<'_, Gsp>) -> Result {
     gsp_falcon.wait_for_processor_suspend().inspect_err(|_| {
@@ -159,7 +219,6 @@ fn reset_gsp_falcon_after_suspend(dev: &device::Device, gsp_falcon: &Falcon<'_, 
 ///
 /// Errors from the reset of the GSP falcon, the DMA transfers and the resume of GSP-RM are
 /// propagated as-is.
-#[expect(dead_code)]
 fn handle_hs_binary(
     ctx: &GspBootContext<'_, '_>,
     libos_dma_address: DmaAddress,
@@ -260,7 +319,6 @@ fn handle_hs_binary(
 ///
 /// Errors from the reset of the GSP falcon, the run of the bootloader and the resume of GSP-RM
 /// are propagated as-is.
-#[expect(dead_code)]
 fn handle_generic_bootloader(
     ctx: &GspBootContext<'_, '_>,
     bootloader: Option<&GenericBootloader>,
