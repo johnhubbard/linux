@@ -33,7 +33,11 @@ use crate::{
         GenericBootloader, //
     },
     gsp::{
-        cmdq::gmc::MessageFromGsp,
+        cmdq::gmc::{
+            GmcMessage,
+            MessageFromGsp, //
+        },
+        fw::GmcCommandId,
         GspBootContext, //
     },
     sbuffer::SBufferIter, //
@@ -111,6 +115,51 @@ pub(super) fn core_resume(
     Ok(())
 }
 
+/// Runs the handler of the load-and-execute event `event`.
+///
+/// `bootloader` is the generic falcon bootloader, on a chipset that boots the GSP through it. The
+/// core resume that ends each handler receives `libos_dma_address` and `bootloader_app_version`.
+///
+/// # Errors
+///
+/// - `EINVAL` if the command ID of `event` is not that of a load-and-execute event.
+///
+/// Errors from the handlers are propagated as-is.
+#[expect(dead_code)]
+pub(super) fn handle_event(
+    ctx: &GspBootContext<'_, '_>,
+    bootloader: Option<&GenericBootloader>,
+    libos_dma_address: DmaAddress,
+    bootloader_app_version: u32,
+    event: &GmcMessage<'_>,
+) -> Result {
+    let dev = ctx.dev();
+    let command = event.header().command();
+
+    match command.id() {
+        Ok(GmcCommandId::ExecGenericBootloader) => handle_generic_bootloader(
+            ctx,
+            bootloader,
+            libos_dma_address,
+            bootloader_app_version,
+            event.payload(),
+        ),
+        Ok(GmcCommandId::ExecHsBinary) => handle_hs_binary(
+            ctx,
+            libos_dma_address,
+            bootloader_app_version,
+            event.payload(),
+        ),
+        _ => {
+            dev_err!(dev, "Unexpected GMC boot event: {:?}\n", command);
+            return Err(EINVAL);
+        }
+    }
+    .inspect_err(|e| {
+        dev_err!(dev, "GMC boot event {:?} failed: {:?}\n", command.id(), e);
+    })
+}
+
 /// Waits until GSP-RM has suspended the RISC-V core, and then runs the core reset.
 fn reset_gsp_falcon_after_suspend(dev: &device::Device, gsp_falcon: &Falcon<'_, Gsp>) -> Result {
     gsp_falcon.wait_for_processor_suspend().inspect_err(|_| {
@@ -139,7 +188,6 @@ fn reset_gsp_falcon_after_suspend(dev: &device::Device, gsp_falcon: &Falcon<'_, 
 ///   falcon has not halted within two seconds of starting the binary.
 ///
 /// Errors from the core reset, the DMA transfers and the core resume are propagated as-is.
-#[expect(dead_code)]
 fn handle_hs_binary(
     ctx: &GspBootContext<'_, '_>,
     libos_dma_address: DmaAddress,
@@ -227,7 +275,6 @@ fn handle_hs_binary(
 ///   falcon has not halted within two seconds of starting the bootloader.
 ///
 /// Errors from the core reset, the bootloader run and the core resume are propagated as-is.
-#[expect(dead_code)]
 fn handle_generic_bootloader(
     ctx: &GspBootContext<'_, '_>,
     bootloader: Option<&GenericBootloader>,
