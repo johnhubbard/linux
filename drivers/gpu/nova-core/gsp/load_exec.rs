@@ -9,7 +9,8 @@
 //!   that verifies an HS binary. The note in "Root of trust establishment" says why the GSP falcon
 //!   stops running GSP-RM, runs an HS binary, and then resumes GSP-RM.
 //! - "Falcon memory subsystem and DMA engine" describes the instruction memory (IMEM) and the data
-//!   memory (DMEM) of a falcon, and the DMA engine that loads a binary into them.
+//!   memory (DMEM) of a falcon, and the DMA engine that loads a binary into them. The DMA engine
+//!   accesses the framebuffer or system memory through the FBIF (Framebuffer Interface).
 
 use core::array;
 
@@ -29,7 +30,12 @@ use crate::{
         FalconBromParams,
         FalconDmaLoadTarget,
         FalconDmaSource,
+        FalconFbifTarget,
         FalconMem, //
+    },
+    firmware::gen_bootloader::{
+        BootloaderDmemDescV2,
+        GenericBootloader, //
     },
     gsp::{
         cmdq::gmc::MessageFromGsp,
@@ -223,6 +229,106 @@ fn handle_hs_binary(
     )
 }
 
+/// Runs the image of a `GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER` event on the falcon core of the GSP
+/// falcon, through the generic falcon bootloader, and then resumes GSP-RM.
+///
+/// `params` holds the descriptor of the image. The generic falcon bootloader loads and starts the
+/// image that the descriptor names, per [`GenericBootloader::run`]. The handler:
+///
+/// 1. Checks that the descriptor in `params` has the size of [`BootloaderDmemDescV2`], and gets
+///    the FBIF (Framebuffer Interface) target that `params` selects.
+/// 2. Waits until GSP-RM has suspended the RISC-V core, for up to five seconds.
+/// 3. Resets the GSP falcon, which selects the falcon core.
+/// 4. Runs `bootloader` with the descriptor and with [`FLCN_ERR_BINARY_NOT_STARTED`] in
+///    `MAILBOX0`, and waits until the falcon core halts, for up to two seconds. The image halts
+///    the falcon core when it is done, so the handler learns from the halt that the image has
+///    finished.
+/// 5. Logs an error if `MAILBOX0` still holds [`FLCN_ERR_BINARY_NOT_STARTED`], which means that
+///    the image did not start.
+/// 6. Resumes GSP-RM on the RISC-V core, via [`resume_gsp_rm`].
+///
+/// An image that reports a status writes the status to `MAILBOX0` before it halts. The handler
+/// does not check that status, so the result does not depend on it.
+///
+/// # Errors
+///
+/// - `EINVAL` if `bootloader` is `None`, if the descriptor size in `params` is not the size of
+///   [`BootloaderDmemDescV2`], or if the address space and the cache attribute in `params` select
+///   no FBIF target.
+/// - `ETIMEDOUT` if GSP-RM has not suspended the RISC-V core within five seconds, or if the
+///   falcon core has not halted within two seconds of its start.
+///
+/// Errors from the reset of the GSP falcon, the run of the bootloader and the resume of GSP-RM
+/// are propagated as-is.
+#[expect(dead_code)]
+fn handle_generic_bootloader(
+    ctx: &GspBootContext<'_, '_>,
+    bootloader: Option<&GenericBootloader>,
+    libos_dma_address: DmaAddress,
+    bootloader_app_version: u32,
+    params: &GenericBootloaderParams,
+) -> Result {
+    /// Expected size of the descriptor, in bytes.
+    const DMEM_DESC_SIZE: u32 = cv!(size_of::<BootloaderDmemDescV2>());
+
+    let dev = ctx.dev();
+    let gsp_falcon = ctx.gsp_falcon;
+    let Some(bootloader) = bootloader else {
+        dev_err!(
+            dev,
+            "No generic bootloader for the load-and-execute event\n"
+        );
+        return Err(EINVAL);
+    };
+
+    if params.dmem_desc_size != DMEM_DESC_SIZE {
+        dev_err!(
+            dev,
+            "Generic bootloader descriptor is {} bytes, expected {}\n",
+            params.dmem_desc_size,
+            DMEM_DESC_SIZE
+        );
+        return Err(EINVAL);
+    }
+
+    let fbif_target = params.fbif_target()?;
+
+    reset_gsp_falcon_after_suspend(dev, gsp_falcon)?;
+
+    let (mbox0, _) = bootloader
+        .run(
+            gsp_falcon,
+            &params.dmem_desc,
+            fbif_target,
+            FLCN_ERR_BINARY_NOT_STARTED,
+        )
+        .inspect_err(|e| {
+            dev_err!(
+                dev,
+                "Failed to run the generic bootloader: {:?} (mbox0={:#x})\n",
+                e,
+                gsp_falcon.read_mailbox0()
+            );
+        })?;
+    if mbox0 == FLCN_ERR_BINARY_NOT_STARTED {
+        dev_err!(dev, "Image of the generic bootloader did not start\n");
+    } else {
+        dev_dbg!(
+            dev,
+            "Image of the generic bootloader halted with mbox0={:#x}\n",
+            mbox0
+        );
+    }
+
+    resume_gsp_rm(
+        dev,
+        gsp_falcon,
+        ctx.sec2_falcon,
+        libos_dma_address,
+        bootloader_app_version,
+    )
+}
+
 /// Payload of a `GMCAPI_CMD_EXEC_HS_BINARY` event, which describes the HS binary to run.
 #[repr(C)]
 struct HsBinaryParams {
@@ -261,6 +367,62 @@ struct HsBinaryParams {
 unsafe impl FromBytes for HsBinaryParams {}
 
 impl MessageFromGsp for HsBinaryParams {
+    type InitError = Error;
+
+    fn read(payload: &mut SBufferIter<array::IntoIter<&[u8], 2>>) -> Result<Self> {
+        let mut bytes = [0u8; size_of::<Self>()];
+
+        payload.read_exact(&mut bytes)?;
+
+        Self::from_bytes_copy(&bytes).ok_or(EINVAL)
+    }
+}
+
+/// Payload of a `GMCAPI_CMD_EXEC_GENERIC_BOOTLOADER` event, which describes the image for the
+/// generic falcon bootloader to run.
+#[repr(C)]
+struct GenericBootloaderParams {
+    /// Descriptor of the image, which the bootloader reads from DMEM.
+    dmem_desc: BootloaderDmemDescV2,
+    /// Size in bytes of the descriptor, as GSP-RM defines it.
+    dmem_desc_size: u32,
+    /// Address space of the image: [`Self::ADDR_SYSMEM`] for system memory, or
+    /// [`Self::ADDR_FBMEM`] for the framebuffer.
+    addr_space: u32,
+    /// CPU cache attribute of an image in system memory: [`Self::NV_MEMORY_CACHED`] or
+    /// [`Self::NV_MEMORY_UNCACHED`].
+    cpu_cache_attrib: u32,
+    _reserved: [u32; 4],
+}
+
+impl GenericBootloaderParams {
+    const ADDR_SYSMEM: u32 = 1;
+    const ADDR_FBMEM: u32 = 2;
+    const NV_MEMORY_CACHED: u32 = 0;
+    const NV_MEMORY_UNCACHED: u32 = 1;
+
+    /// Returns the FBIF target that `addr_space` and `cpu_cache_attrib` select.
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` if the pair selects no FBIF target.
+    fn fbif_target(&self) -> Result<FalconFbifTarget> {
+        match (self.addr_space, self.cpu_cache_attrib) {
+            (Self::ADDR_FBMEM, _) => Ok(FalconFbifTarget::LocalFb),
+            (Self::ADDR_SYSMEM, Self::NV_MEMORY_CACHED) => Ok(FalconFbifTarget::CoherentSysmem),
+            (Self::ADDR_SYSMEM, Self::NV_MEMORY_UNCACHED) => {
+                Ok(FalconFbifTarget::NoncoherentSysmem)
+            }
+            _ => Err(EINVAL),
+        }
+    }
+}
+
+// SAFETY: The nested descriptor is `FromBytes`, and every other field is an integer type for
+// which all bit patterns are valid.
+unsafe impl FromBytes for GenericBootloaderParams {}
+
+impl MessageFromGsp for GenericBootloaderParams {
     type InitError = Error;
 
     fn read(payload: &mut SBufferIter<array::IntoIter<&[u8], 2>>) -> Result<Self> {
