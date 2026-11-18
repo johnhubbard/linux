@@ -112,6 +112,8 @@ pub(crate) struct Gsp<'gsp> {
     pub(crate) cmdq: Cmdq<'gsp>,
     /// RM arguments.
     rmargs: Coherent<'gsp, GspArgumentsPadded>,
+    /// Buffer in which GSP-RM reports its own state.
+    rm_state_monitor: Coherent<'gsp, [u8; GSP_PAGE_SIZE]>,
 }
 
 impl<'gsp> Gsp<'gsp> {
@@ -131,6 +133,7 @@ impl<'gsp> Gsp<'gsp> {
             Ok(try_pin_init!(Self {
                 cmdq <- Cmdq::new(dev, bar),
                 rmargs: Coherent::init(dev, GFP_KERNEL, GspArgumentsPadded::new(&cmdq))?,
+                rm_state_monitor: Coherent::zeroed(dev, GFP_KERNEL)?,
                 libos: {
                     let mut libos = CoherentBox::zeroed_slice(
                         dev,
@@ -138,19 +141,11 @@ impl<'gsp> Gsp<'gsp> {
                         GFP_KERNEL,
                     )?;
 
+                    log_buffers.init_arguments(&mut libos)?;
                     libos.init_at(
-                        0,
-                        LibosMemoryRegionInitArgument::new("LOGINIT", &log_buffers.loginit.0),
+                        LogBuffers::COUNT,
+                        LibosMemoryRegionInitArgument::new("RMARGS", rmargs),
                     )?;
-                    libos.init_at(
-                        1,
-                        LibosMemoryRegionInitArgument::new("LOGINTR", &log_buffers.logintr.0),
-                    )?;
-                    libos.init_at(
-                        2,
-                        LibosMemoryRegionInitArgument::new("LOGRM", &log_buffers.logrm.0),
-                    )?;
-                    libos.init_at(3, LibosMemoryRegionInitArgument::new("RMARGS", rmargs))?;
 
                     libos.into()
                 },

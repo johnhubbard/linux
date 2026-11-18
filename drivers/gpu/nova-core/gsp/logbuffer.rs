@@ -5,7 +5,10 @@
 use kernel::{
     debugfs,
     device,
-    dma::Coherent,
+    dma::{
+        Coherent,
+        CoherentBox, //
+    },
     io::{
         io_project,
         Io, //
@@ -20,6 +23,7 @@ use kernel::{
 
 use crate::{
     gsp::{
+        LibosMemoryRegionInitArgument,
         PteArray,
         GSP_PAGE_SIZE, //
     },
@@ -28,7 +32,6 @@ use crate::{
 
 /// Number of GSP pages to use in a RM log buffer.
 const RM_LOG_BUFFER_NUM_PAGES: usize = 0x10;
-const LOG_BUFFER_SIZE: usize = RM_LOG_BUFFER_NUM_PAGES * GSP_PAGE_SIZE;
 
 /// The logging buffers are byte queues that contain encoded printf-like
 /// messages from GSP-RM.  They need to be decoded by a special application
@@ -44,9 +47,21 @@ const LOG_BUFFER_SIZE: usize = RM_LOG_BUFFER_NUM_PAGES * GSP_PAGE_SIZE;
 /// then pp points to index into the buffer where the next logging entry will
 /// be written. Therefore, the logging data is valid if:
 ///   1 <= pp < sizeof(buffer)/sizeof(u64)
-pub(super) struct LogBuffer<'a>(pub(super) Coherent<'a, [u8; LOG_BUFFER_SIZE]>);
+pub(super) struct LogBuffer<'a, const NUM_PAGES: usize>(
+    pub(super) Coherent<'a, [[u8; GSP_PAGE_SIZE]; NUM_PAGES]>,
+);
 
-impl<'a> LogBuffer<'a> {
+/// A log buffer at the default size, [`RM_LOG_BUFFER_NUM_PAGES`] pages.
+///
+/// Matches the registry defaults for the init, interrupt, RM and MNOC tasks
+/// (`NV_REG_STR_RM_GSP_LOG_BUFFER_SIZE_TASK_*_DEFAULT`).
+type TaskLogBuffer<'a> = LogBuffer<'a, RM_LOG_BUFFER_NUM_PAGES>;
+
+/// A single-page log buffer, the size of the logs of the root task and of the RM state monitor
+/// task.
+type SmallLogBuffer<'a> = LogBuffer<'a, 1>;
+
+impl<'a, const NUM_PAGES: usize> LogBuffer<'a, NUM_PAGES> {
     /// Creates a new `LogBuffer` mapped on `dev`.
     fn new(dev: &'a device::Device<device::Bound>) -> Result<Self> {
         let obj = Self(Coherent::zeroed(dev, GFP_KERNEL)?);
@@ -55,9 +70,9 @@ impl<'a> LogBuffer<'a> {
 
         let pte_view = io_project!(
             obj.0,
-            [build: size_of::<u64>()..][build: ..RM_LOG_BUFFER_NUM_PAGES * size_of::<u64>()]
+            [build: 0][build: size_of::<u64>()..][build: ..NUM_PAGES * size_of::<u64>()]
         )
-        .try_cast::<PteArray<RM_LOG_BUFFER_NUM_PAGES>>()?;
+        .try_cast::<PteArray<NUM_PAGES>>()?;
         PteArray::init(pte_view, start_addr)?;
 
         Ok(obj)
@@ -65,7 +80,7 @@ impl<'a> LogBuffer<'a> {
 
     /// Copies the buffer, or returns an empty vector if the GSP never wrote to it.
     fn snapshot(&self) -> Result<VVec<u8>> {
-        let put = io_project!(self.0, [build: ..size_of::<u64>()])
+        let put = io_project!(self.0, [build: 0][build: ..size_of::<u64>()])
             .try_cast::<u64>()?
             .read_val();
         if put == 0 {
@@ -76,8 +91,11 @@ impl<'a> LogBuffer<'a> {
         // GSP that failed to boot may still be writing.
         dma_mb(Read);
 
-        let mut snapshot = VVec::zeroed(LOG_BUFFER_SIZE, GFP_KERNEL)?;
-        io_project!(self.0, [build: ..]).copy_to_slice(&mut snapshot);
+        let mut snapshot = VVec::zeroed(NUM_PAGES * GSP_PAGE_SIZE, GFP_KERNEL)?;
+        for (i, page) in snapshot.chunks_exact_mut(GSP_PAGE_SIZE).enumerate() {
+            // PANIC: `snapshot` holds `NUM_PAGES` pages, so `i` is below `NUM_PAGES`.
+            io_project!(self.0, [panic: i][build: ..]).copy_to_slice(page);
+        }
 
         // The copy reads "put" again, unordered against the data, so keep the value read above.
         snapshot[..size_of::<u64>()].copy_from_slice(&put.to_ne_bytes());
@@ -86,26 +104,76 @@ impl<'a> LogBuffer<'a> {
     }
 }
 
+/// The log buffers to which GSP-RM writes its debug output, one per LIBOS3 task.
+///
+/// The r000 firmware runs LIBOS3 on GA102 and later, and LIBOS2 on Turing and GA100. LIBOS2 maps
+/// only the init and RM log buffers, and skips the names that it does not have.
 pub(super) struct LogBuffers<'a> {
     /// Device the buffers belong to.
     dev: &'a device::Device<device::Bound>,
     /// Init log buffer.
-    pub(super) loginit: LogBuffer<'a>,
+    loginit: TaskLogBuffer<'a>,
     /// Interrupts log buffer.
-    pub(super) logintr: LogBuffer<'a>,
+    logintr: TaskLogBuffer<'a>,
     /// RM log buffer.
-    pub(super) logrm: LogBuffer<'a>,
+    logrm: TaskLogBuffer<'a>,
+    /// MNOC log buffer.
+    logmnoc: TaskLogBuffer<'a>,
+    /// Root task log buffer.
+    logroot: SmallLogBuffer<'a>,
+    /// RM state monitor task log buffer.
+    logrmon: SmallLogBuffer<'a>,
 }
 
 impl<'a> LogBuffers<'a> {
+    /// Number of log buffers.
+    pub(super) const COUNT: usize = 6;
+
     /// Allocates the log buffers of `dev`.
     pub(super) fn new(dev: &'a device::Device<device::Bound>) -> Result<Self> {
         Ok(Self {
             dev,
-            loginit: LogBuffer::new(dev)?,
-            logintr: LogBuffer::new(dev)?,
-            logrm: LogBuffer::new(dev)?,
+            loginit: TaskLogBuffer::new(dev)?,
+            logintr: TaskLogBuffer::new(dev)?,
+            logrm: TaskLogBuffer::new(dev)?,
+            logmnoc: TaskLogBuffer::new(dev)?,
+            logroot: SmallLogBuffer::new(dev)?,
+            logrmon: SmallLogBuffer::new(dev)?,
         })
+    }
+
+    /// Fills the first [`Self::COUNT`] entries of `libos` with the log buffers, under the names
+    /// that GSP-RM looks them up by.
+    pub(super) fn init_arguments(
+        &self,
+        libos: &mut CoherentBox<'_, [LibosMemoryRegionInitArgument]>,
+    ) -> Result {
+        libos.init_at(
+            0,
+            LibosMemoryRegionInitArgument::new("LOGINIT", &self.loginit.0),
+        )?;
+        libos.init_at(
+            1,
+            LibosMemoryRegionInitArgument::new("LOGINTR", &self.logintr.0),
+        )?;
+        libos.init_at(
+            2,
+            LibosMemoryRegionInitArgument::new("LOGRM", &self.logrm.0),
+        )?;
+        libos.init_at(
+            3,
+            LibosMemoryRegionInitArgument::new("LOGMNOC", &self.logmnoc.0),
+        )?;
+        libos.init_at(
+            4,
+            LibosMemoryRegionInitArgument::new("LOGROOT", &self.logroot.0),
+        )?;
+        libos.init_at(
+            5,
+            LibosMemoryRegionInitArgument::new("LOGRMON", &self.logrmon.0),
+        )?;
+
+        Ok(())
     }
 
     /// Exposes the buffers in debugfs, in a directory named after their device.
@@ -120,6 +188,9 @@ impl<'a> LogBuffers<'a> {
             dir.read_binary_file(c"loginit", &logs.loginit.0);
             dir.read_binary_file(c"logintr", &logs.logintr.0);
             dir.read_binary_file(c"logrm", &logs.logrm.0);
+            dir.read_binary_file(c"logmnoc", &logs.logmnoc.0);
+            dir.read_binary_file(c"logroot", &logs.logroot.0);
+            dir.read_binary_file(c"logrmon", &logs.logrmon.0);
         })
     }
 
@@ -134,9 +205,12 @@ impl<'a> LogBuffers<'a> {
             loginit: self.loginit.snapshot()?,
             logintr: self.logintr.snapshot()?,
             logrm: self.logrm.snapshot()?,
+            logmnoc: self.logmnoc.snapshot()?,
+            logroot: self.logroot.snapshot()?,
+            logrmon: self.logrmon.snapshot()?,
         };
 
-        if logs.loginit.is_empty() && logs.logintr.is_empty() && logs.logrm.is_empty() {
+        if logs.is_empty() {
             return Ok(());
         }
 
@@ -155,6 +229,15 @@ impl<'a> LogBuffers<'a> {
             }
             if !logs.logrm.is_empty() {
                 dir.read_binary_file(c"logrm", &logs.logrm);
+            }
+            if !logs.logmnoc.is_empty() {
+                dir.read_binary_file(c"logmnoc", &logs.logmnoc);
+            }
+            if !logs.logroot.is_empty() {
+                dir.read_binary_file(c"logroot", &logs.logroot);
+            }
+            if !logs.logrmon.is_empty() {
+                dir.read_binary_file(c"logrmon", &logs.logrmon);
             }
         }))?;
 
@@ -180,6 +263,24 @@ struct RetainedLogBuffers {
     logintr: VVec<u8>,
     /// RM log buffer, empty if never written to.
     logrm: VVec<u8>,
+    /// MNOC log buffer, empty if never written to.
+    logmnoc: VVec<u8>,
+    /// Root task log buffer, empty if never written to.
+    logroot: VVec<u8>,
+    /// RM state monitor task log buffer, empty if never written to.
+    logrmon: VVec<u8>,
+}
+
+impl RetainedLogBuffers {
+    /// Returns `true` if the GSP never wrote to any of the buffers.
+    fn is_empty(&self) -> bool {
+        self.loginit.is_empty()
+            && self.logintr.is_empty()
+            && self.logrm.is_empty()
+            && self.logmnoc.is_empty()
+            && self.logroot.is_empty()
+            && self.logrmon.is_empty()
+    }
 }
 
 /// Copies of the log buffers of all GPUs that are no longer bound.
