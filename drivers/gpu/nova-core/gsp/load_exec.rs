@@ -62,7 +62,11 @@ pub(super) fn resume_gsp_rm(
     // Verify SEC2 completed successfully by checking its mailbox for errors.
     let mbox0 = sec2_falcon.read_mailbox0();
     if mbox0 != 0 {
-        dev_err!(dev, "Sequencer: sec2 errors: {:?}\n", mbox0);
+        dev_err!(
+            dev,
+            "SEC2 reported an error while resuming GSP-RM: {:#x}\n",
+            mbox0
+        );
         return Err(EIO);
     }
 
@@ -71,7 +75,7 @@ pub(super) fn resume_gsp_rm(
 
     // Verify the GSP's RISC-V core is active indicating successful GSP boot.
     if !gsp_falcon.is_riscv_active() {
-        dev_err!(dev, "Sequencer: RISC-V core is not active\n");
+        dev_err!(dev, "GSP RISC-V core is not active after resuming GSP-RM\n");
         return Err(EIO);
     }
     Ok(())
