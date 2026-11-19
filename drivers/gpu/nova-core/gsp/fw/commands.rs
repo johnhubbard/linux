@@ -88,7 +88,7 @@ impl GspSetSystemInfo {
             gpuPhysAddr: dev.resource_start(0)?,
             gpuPhysFbAddr: dev.resource_start(1)?,
             gpuPhysInstAddr: dev.resource_start(3)?,
-            nvDomainBusDeviceFunc: u64::from(dev.dev_id()),
+            nvDomainBusDeviceFunc: u64::from(DomainBusDevice::new(dev)),
 
             // Using TASK_SIZE in r535_gsp_rpc_set_system_info() seems wrong because
             // TASK_SIZE is per-task. That's probably a design issue in GSP-RM though.
@@ -374,6 +374,41 @@ nvkv_encode! {
         bus_device_func: Key<u64, 0x1020>,
         regkeys: KVVec<RegKey>,
         vf_info: Option<VfInfo>,
+    }
+}
+
+bitfield! {
+    /// A PCI device id as `PCI_DEVID` packs it: the bus number and the device and function
+    /// numbers.
+    struct PciDevId(u16) {
+        15:8 bus;
+        7:3 device;
+        2:0 function;
+    }
+}
+
+bitfield! {
+    /// A GPU's PCI location as GSP-RM reads it: the domain, the bus number and the device number.
+    /// GSP-RM names the value after the function number as well, but the value does not hold one.
+    struct DomainBusDevice(u64) {
+        /// PCI domain number.
+        63:32 domain;
+        /// PCI bus number.
+        15:8 bus;
+        /// PCI device number.
+        7:0 device;
+    }
+}
+
+impl DomainBusDevice {
+    /// Returns the PCI location of `dev`.
+    fn new(dev: &pci::Device<device::Bound>) -> Self {
+        let dev_id = PciDevId::from(dev.dev_id());
+
+        Self::zeroed()
+            .with_domain(dev.domain_nr())
+            .with_bus(u8::from(dev_id.bus()))
+            .with_device(u8::from(dev_id.device()))
     }
 }
 
