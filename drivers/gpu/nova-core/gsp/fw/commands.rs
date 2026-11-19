@@ -18,6 +18,7 @@ use kernel::{
 use crate::{
     gpu::Chipset,
     gsp::{
+        commands::GspStaticInfo,
         nvkv::{
             nvkv_decode,
             nvkv_encode,
@@ -421,7 +422,9 @@ nvkv_decode! {
     // https://github.com/rust-lang/rust/pull/154377
     #[allow(dead_code)]
     struct GspInitResponseSchema => GspInitResponse {
-        gpu_name: TruncatingArray<u8, { GspInitResponse::MAX_GPU_NAME_LEN }, 0x2000>,
+        gpu_name: TruncatingArray<u8, { GspStaticInfo::MAX_GPU_NAME_LEN }, 0x2000>,
+        gpu_short_name: TruncatingArray<u8, { GspStaticInfo::MAX_GPU_NAME_LEN }, 0x2001>,
+        gpu_gid: TruncatingArray<u8, { GspStaticInfo::GID_LEN }, 0x2002>,
         fb_regions: Accumulated<FbRegionSchema>,
         bar1_pde_base: Required<Key<u64, 0x1020>>,
         vmmu_segment_size: Key<u64, 0x1050>,
@@ -433,14 +436,12 @@ nvkv_decode! {
 // https://github.com/rust-lang/rust/pull/154377
 #[allow(dead_code)]
 struct GspInitResponse {
-    gpu_name: ArrayVec<u8, { Self::MAX_GPU_NAME_LEN }>,
+    gpu_name: ArrayVec<u8, { GspStaticInfo::MAX_GPU_NAME_LEN }>,
+    gpu_short_name: ArrayVec<u8, { GspStaticInfo::MAX_GPU_NAME_LEN }>,
+    gpu_gid: ArrayVec<u8, { GspStaticInfo::GID_LEN }>,
     fb_regions: KVVec<FbRegion>,
     bar1_pde_base: u64,
     vmmu_segment_size: u64,
-}
-
-impl GspInitResponse {
-    const MAX_GPU_NAME_LEN: usize = 64;
 }
 
 nvkv_decode! {
